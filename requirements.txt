@@ -1,0 +1,5 @@
+# 密码保险箱运行依赖
+# 安装：pip install -r requirements.txt
+
+PySide6>=6.6          # 界面框架（Qt for Python）
+cryptography>=42.0    # AES-256-GCM 与 scrypt 密钥派生
