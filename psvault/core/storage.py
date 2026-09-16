@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
@@ -18,8 +19,20 @@ from typing import Any, Iterable
 from . import crypto
 from .models import DEFAULT_CATEGORY, Entry, Settings, now_iso
 
+
+def application_root() -> Path:
+    """程序根目录。
+
+    源码运行时是项目目录；PyInstaller 打包后是 exe 所在目录——这样数据文件
+    始终和程序放在一起，用户看得见、方便备份，也不会写进只读的安装目录。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
 # 默认数据文件位置：程序目录下的 data/vault.psvault
-DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+DEFAULT_DATA_DIR = application_root() / "data"
 DEFAULT_VAULT_NAME = "vault.psvault"
 
 # 新建保险箱时自带的分类（"未分类"不可删除）

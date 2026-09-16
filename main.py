@@ -106,12 +106,31 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # 隐藏参数：用于打包后排查"双击没反应"的问题
+    if "--selftest" in sys.argv:
+        from psvault.selftest import run_selftest
+
+        sys.exit(run_selftest(sys.argv))
+
     try:
         sys.exit(main())
     except Exception as exc:  # noqa: BLE001 - 顶层兜底，避免闪退无提示
         import traceback
 
-        traceback.print_exc()
+        # 打包成无控制台程序后 sys.stdout/stderr 可能是 None，打印要容错
+        detail = traceback.format_exc()
+        try:
+            if sys.stderr is not None:
+                sys.stderr.write(detail)
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            from psvault.core.storage import application_root
+
+            crash_log = application_root() / "crash.log"
+            crash_log.write_text(detail, encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
         try:
             app = QApplication.instance() or QApplication(sys.argv)
             QMessageBox.critical(None, "密码保险箱启动失败",

@@ -11,6 +11,13 @@
 
 ## 快速开始
 
+**方式一：直接用打包好的 exe（不需要装 Python）**
+
+进入 `dist/密码保险箱/`，双击 **`密码保险箱.exe`** 即可。
+整个文件夹一起拷贝分发，不能只拿 exe——运行库在 `_internal` 目录里。
+
+**方式二：从源码运行**
+
 ```bash
 pip install -r requirements.txt
 
@@ -107,6 +114,7 @@ python main.py            # 从命令行启动（可见日志）
 │   │   ├── strength.py         强度评估与安全审计
 │   │   ├── totp.py             两步验证算法
 │   │   └── porting.py          CSV / JSON 导入导出
+│   ├── selftest.py             打包后的运行环境自检（--selftest）
 │   └── ui/                     PySide6 界面层
 │       ├── theme.py            颜色令牌与样式表
 │       ├── icons.py            内置矢量图标
@@ -118,6 +126,11 @@ python main.py            # 从命令行启动（可见日志）
 │       ├── generator_dialog.py 密码生成器
 │       ├── settings_dialog.py  设置（含保险箱改名）
 │       └── audit_dialog.py     安全审计
+├── tools/                      构建脚本
+│   ├── build_exe.py            打包成单目录 exe
+│   ├── make_icon.py            生成应用图标 assets/app.ico
+│   └── version_info.txt        exe 的版本信息
+├── assets/app.ico              应用图标（7 个尺寸）
 ├── tests/                      测试
 └── data/vault.psvault          默认数据文件（首次运行后生成）
 ```
@@ -132,13 +145,32 @@ python tests/smoke_ui.py                              # 无头渲染全部窗口
 
 界面测试运行在 Qt 的 `offscreen` 平台上，不需要真实显示器。
 
-## 打包成可执行文件（可选）
+## 打包成 exe（单目录形式）
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --name 密码保险箱 ^
-  --add-data "psvault;psvault" main.py
+python tools/build_exe.py
 ```
 
-打包后建议把数据文件放在可写目录，或在 `psvault/core/storage.py` 中调整
-`default_vault_path()` 的默认位置。
+产物在 `dist/密码保险箱/`：
+
+```
+密码保险箱/
+├── 密码保险箱.exe        主程序（约 2.3 MB，图标与版本信息已嵌入）
+├── _internal/            运行库，必须与 exe 一起分发
+├── 使用说明.txt
+└── data/                 首次运行后生成，存放保险箱文件
+```
+
+打包要点：
+
+- **图标**：`assets/app.ico`，由 `tools/make_icon.py` 生成——圆角蓝色底 + 白色盾牌钥匙孔，
+  与界面里的标志同源，内含 16/24/32/48/64/128/256 七个尺寸（小尺寸会加粗描边，避免糊成一团）。
+  执行 `python tools/make_icon.py --preview` 可以输出各尺寸放大对照图。
+- **版本信息**：`tools/version_info.txt`，显示在 exe 的「属性 → 详细信息」里。
+- **数据位置**：打包后 `application_root()` 返回 exe 所在目录，数据保存在 exe 同级的 `data/`，
+  不会写进只读的安装目录，也方便用户自己备份。
+
+**排查“双击没反应”**：在命令行执行 `密码保险箱.exe --selftest`，
+它会把运行环境自检结果（依赖、数据目录可写性、加解密、图标渲染、界面构建）写到同目录的
+`selftest.log`，用退出码表示成功与否。源码运行时同样可用：`python main.py --selftest`。

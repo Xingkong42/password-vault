@@ -10,10 +10,15 @@ data/
 *.psvault.bak
 *.psvault.tmp
 
-# 测试产物
+# 测试与自检产物
 tests/shots/
+selftest.log
+crash.log
 
 # 打包产物
 build/
 dist/
 *.spec
+
+# 图标尺寸对照图（app.ico 与 app-256.png 需要提交，这个是调试用的）
+assets/app-sizes.png
