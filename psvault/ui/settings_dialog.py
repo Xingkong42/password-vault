@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -105,6 +106,19 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 12, 4, 12)
         layout.setSpacing(14)
+
+        # 保险箱名称
+        card, card_layout = self._card("保险箱")
+        self.vault_name_edit = QLineEdit()
+        self.vault_name_edit.setMinimumHeight(36)
+        self.vault_name_edit.setPlaceholderText("例如：我的密码库")
+        self.vault_name_edit.setText(str(self.vault.meta.get("name") or ""))
+        self.vault_name_edit.setClearButtonEnabled(True)
+        card_layout.addLayout(self._row(
+            "名称", self.vault_name_edit,
+            "显示在窗口标题与侧栏，用于区分多个保险箱；留空则使用文件名。"))
+        card_layout.addWidget(widgets.hint_label(f"当前文件：{self.vault.path}"))
+        layout.addWidget(card)
 
         # 主题
         card, card_layout = self._card("外观")
@@ -429,6 +443,7 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------ 保存
 
     def _save(self) -> None:
+        self.vault.set_name(self.vault_name_edit.text())
         settings = self.vault.settings
         settings.auto_lock_minutes = self.auto_lock_spin.value()
         settings.clipboard_clear_seconds = self.clipboard_spin.value()

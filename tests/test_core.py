@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from psvault.core import crypto, generator, porting, strength, totp  # noqa: E402
+from psvault.core import crypto, generator, porting, storage, strength, totp  # noqa: E402
 from psvault.core.models import Entry, Settings  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 
@@ -278,6 +278,110 @@ class PortingTest(unittest.TestCase):
         back = porting.import_json(path)
         self.assertEqual(back[0].title, "X")
         self.assertEqual(back[0].password, "p")
+
+    def test_csv_keeps_reserved_phone_and_email(self) -> None:
+        """导出再导入时，预留电话/邮箱不能与登录账号串位。"""
+        entries = [Entry(title="T", username="login_name", password="p",
+                         phone="13800000000", email="backup@example.com")]
+        path = self.dir / "contact.csv"
+        porting.export_csv(entries, path)
+        back = porting.import_csv(path)
+        self.assertEqual(back[0].username, "login_name")
+        self.assertEqual(back[0].phone, "13800000000")
+        self.assertEqual(back[0].email, "backup@example.com")
+
+    def test_csv_chinese_contact_headers(self) -> None:
+        path = self.dir / "contact_cn.csv"
+        path.write_text("名称,用户名,密码,手机号,备用邮箱\n某站,user,pw,13900000000,spare@x.com\n",
+                        encoding="utf-8-sig")
+        back = porting.import_csv(path)
+        self.assertEqual(back[0].username, "user")
+        self.assertEqual(back[0].phone, "13900000000")
+        self.assertEqual(back[0].email, "spare@x.com")
+
+
+class EntryFieldsTest(unittest.TestCase):
+    """新增字段（预留电话 / 预留邮箱）的兼容性。"""
+
+    def test_roundtrip(self) -> None:
+        entry = Entry(title="A", phone="13800000000", email="a@example.com")
+        restored = Entry.from_dict(entry.to_dict())
+        self.assertEqual(restored.phone, "13800000000")
+        self.assertEqual(restored.email, "a@example.com")
+
+    def test_legacy_entry_without_new_fields(self) -> None:
+        """老数据没有这两个字段时应正常加载为空值。"""
+        entry = Entry.from_dict({"title": "旧记录", "username": "u", "password": "p"})
+        self.assertEqual(entry.phone, "")
+        self.assertEqual(entry.email, "")
+
+    def test_search_covers_contact_fields(self) -> None:
+        entry = Entry(title="A", phone="13800000000", email="backup@example.com")
+        self.assertTrue(entry.matches("1380"))
+        self.assertTrue(entry.matches("backup"))
+
+
+class VaultNameTest(unittest.TestCase):
+    """保险箱名称与默认分类。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "named.psvault"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_default_categories_include_key(self) -> None:
+        vault = Vault.create(self.path, "Master#2024")
+        self.assertIn("密钥", vault.categories)
+        self.assertIn("邮箱", vault.categories)
+
+    def test_create_with_name(self) -> None:
+        vault = Vault.create(self.path, "Master#2024", name="我的密码库")
+        self.assertEqual(vault.name, "我的密码库")
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual(reopened.name, "我的密码库")
+
+    def test_name_falls_back_to_filename(self) -> None:
+        vault = Vault.create(self.path, "Master#2024")
+        self.assertEqual(vault.name, "named")
+
+    def test_set_name(self) -> None:
+        vault = Vault.create(self.path, "Master#2024")
+        vault.set_name("工作保险箱")
+        vault.save()
+        self.assertEqual(Vault.open(self.path, "Master#2024").name, "工作保险箱")
+
+    def test_sanitize_filename(self) -> None:
+        self.assertEqual(storage.sanitize_filename('我的/密码:库*?"'), "我的密码库")
+        self.assertEqual(storage.sanitize_filename("   "), "vault")
+
+    def test_legacy_vault_gets_new_categories_once(self) -> None:
+        """老文件补齐新增分类，且用户删除后不会被再次补回。"""
+        vault = Vault.create(self.path, "Master#2024")
+        vault.categories = ["未分类", "邮箱"]
+        vault.meta.pop("schema_version", None)
+        vault.save()
+
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertIn("密钥", reopened.categories)
+        self.assertTrue(reopened.dirty)
+
+        reopened.remove_category("密钥")
+        reopened.save()
+
+        again = Vault.open(self.path, "Master#2024")
+        self.assertNotIn("密钥", again.categories)
+        self.assertFalse(again.dirty)
+
+    def test_user_can_add_and_remove_categories(self) -> None:
+        vault = Vault.create(self.path, "Master#2024")
+        self.assertTrue(vault.add_category("设备"))
+        self.assertFalse(vault.add_category("设备"))          # 去重
+        entry = vault.add_entry(Entry(title="路由器", category="设备"))
+        self.assertTrue(vault.remove_category("设备"))
+        self.assertEqual(entry.category, "未分类")
+        self.assertFalse(vault.remove_category("未分类"))       # 系统分类不可删
 
 
 class SettingsTest(unittest.TestCase):

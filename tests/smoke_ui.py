@@ -32,6 +32,7 @@ from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
 from psvault.ui.audit_dialog import AuditDialog  # noqa: E402
+from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.generator_dialog import GeneratorDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
@@ -43,10 +44,12 @@ SHOTS = ROOT / "tests" / "shots"
 
 SAMPLE = [
     Entry(title="GitHub", username="xingkong42", password="Xk7#mQ2!vL9$pR4@",
+          phone="138 0000 0000", email="backup@example.com",
           url="https://github.com", category="开发", tags=["工作", "代码"],
           favorite=True, totp_secret="JBSWY3DPEHPK3PXP",
           notes="开启了两步验证，恢复码存放在离线笔记中。"),
     Entry(title="招商银行", username="6214 **** 8823", password="Bank@2024#safe",
+          phone="95555", email="card@example.com",
           url="https://www.cmbchina.com", category="金融", tags=["重要"]),
     Entry(title="知乎", username="sophon@example.com", password="zhihu123",
           url="https://www.zhihu.com", category="社交"),
@@ -67,7 +70,7 @@ def build_vault() -> Vault:
     """在临时目录里造一个带样例数据的保险箱。"""
     tmp = Path(tempfile.mkdtemp(prefix="psvault-smoke-"))
     path = tmp / "vault.psvault"
-    vault = Vault.create(path, "SmokeTest#2024")
+    vault = Vault.create(path, "SmokeTest#2024", name="我的密码库")
     for entry in SAMPLE:
         vault.add_entry(entry)
     vault.save()
@@ -106,6 +109,13 @@ def main() -> int:
         unlock = UnlockDialog(path=vault.path)
         shot(unlock, f"unlock-{mode}", app)
 
+        creator = UnlockDialog(path=vault.path.with_name("新建保险箱.psvault"))
+        creator.name_edit.setText("我的密码库")
+        shot(creator, f"create-{mode}", app)
+
+        categories = CategoryDialog(window, vault)
+        shot(categories, f"category-{mode}", app)
+
         generator = GeneratorDialog(window)
         shot(generator, f"generator-{mode}", app)
 
@@ -118,7 +128,8 @@ def main() -> int:
         editor = EntryDialog(window, vault, vault.active_entries()[0])
         shot(editor, f"editor-{mode}", app)
 
-        for widget in (window, unlock, generator, settings, audit, editor):
+        for widget in (window, unlock, creator, categories, generator,
+                       settings, audit, editor):
             widget.hide()
             widget.deleteLater()
         app.processEvents()

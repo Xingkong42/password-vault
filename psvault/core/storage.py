@@ -22,10 +22,23 @@ from .models import DEFAULT_CATEGORY, Entry, Settings, now_iso
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 DEFAULT_VAULT_NAME = "vault.psvault"
 
+# 新建保险箱时自带的分类（"未分类"不可删除）
+DEFAULT_CATEGORIES = ["未分类", "密钥", "邮箱", "社交", "金融", "开发", "购物"]
+
+# 数据格式版本：老文件打开时会按需补齐新增的默认分类
+SCHEMA_VERSION = 2
+
 
 def default_vault_path() -> Path:
     """返回默认保险箱文件路径。"""
     return DEFAULT_DATA_DIR / DEFAULT_VAULT_NAME
+
+
+def sanitize_filename(name: str) -> str:
+    """把保险箱名称转成安全的文件名（去掉 Windows 不允许的字符）。"""
+    cleaned = "".join(ch for ch in name.strip() if ch not in '\\/:*?"<>|')
+    cleaned = cleaned.strip(" .")
+    return cleaned or "vault"
 
 
 class Vault:
@@ -59,8 +72,9 @@ class Vault:
         password: str,
         *,
         settings: Settings | None = None,
+        name: str = "",
     ) -> Vault:
-        """新建一个空保险箱并立即落盘。"""
+        """新建一个空保险箱并立即落盘。name 为保险箱名称（可选）。"""
         salt = crypto.new_salt()
         kdf = crypto.kdf_parameters(salt)
         key = crypto.derive_key(password, salt)
@@ -69,9 +83,13 @@ class Vault:
             key=key,
             kdf=kdf,
             entries=[],
-            categories=[DEFAULT_CATEGORY, "邮箱", "社交", "金融", "开发", "购物"],
+            categories=list(DEFAULT_CATEGORIES),
             settings=settings or Settings(),
-            meta={"created_at": now_iso()},
+            meta={
+                "created_at": now_iso(),
+                "schema_version": SCHEMA_VERSION,
+                "name": name.strip(),
+            },
         )
         vault.save()
         return vault
@@ -100,15 +118,33 @@ class Vault:
         if DEFAULT_CATEGORY not in categories:
             categories.insert(0, DEFAULT_CATEGORY)
         settings = Settings.from_dict(payload.get("settings", {}))
-        return cls(
+        meta = payload.get("meta", {}) or {}
+
+        vault = cls(
             path=path,
             key=key,
             kdf=container["kdf"],
             entries=entries,
             categories=categories,
             settings=settings,
-            meta=payload.get("meta", {}),
+            meta=meta,
         )
+        vault._migrate()
+        return vault
+
+    def _migrate(self) -> None:
+        """老版本数据升级：补齐新增的默认分类，并标记格式版本。"""
+        try:
+            version = int(self.meta.get("schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            version = 1
+        if version >= SCHEMA_VERSION:
+            return
+        for category in DEFAULT_CATEGORIES:
+            if category not in self.categories:
+                self.categories.append(category)
+        self.meta["schema_version"] = SCHEMA_VERSION
+        self.dirty = True      # 由调用方在合适的时机落盘
 
     def lock(self) -> None:
         """清除内存中的密钥与数据引用。"""
@@ -119,6 +155,19 @@ class Vault:
     def is_locked(self) -> bool:
         """密钥是否已被清除。"""
         return not self._key
+
+    # ------------------------------------------------------------ 名称
+
+    @property
+    def name(self) -> str:
+        """保险箱名称；未命名时退回文件名，保证界面总有东西可显示。"""
+        stored = str(self.meta.get("name") or "").strip()
+        return stored or self.path.stem
+
+    def set_name(self, name: str) -> None:
+        """设置保险箱名称（空字符串表示恢复为文件名）。"""
+        self.meta["name"] = name.strip()
+        self.dirty = True
 
     # ------------------------------------------------------------ 持久化
 
@@ -211,7 +260,8 @@ class Vault:
         entry = self.find(entry_id)
         if entry is None:
             return None
-        for field_name in ("title", "username", "url", "notes", "category", "totp_secret"):
+        for field_name in ("title", "username", "phone", "email", "url", "notes",
+                           "category", "totp_secret"):
             if field_name in data:
                 setattr(entry, field_name, str(data[field_name]))
         if "tags" in data:

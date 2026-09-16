@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPlainTextEdit,
     QScrollArea,
     QVBoxLayout,
@@ -119,6 +120,17 @@ class EntryDialog(QDialog):
         form.addWidget(self.history_toggle)
         form.addWidget(self.history_box)
 
+        # 预留电话 / 预留邮箱（找回账号时常用）
+        self.phone_edit = self._line_edit("例如：138 0000 0000")
+        copy_phone = IconButton("copy", "复制预留电话", box=30, size=15)
+        copy_phone.clicked.connect(lambda: self._copy(self.phone_edit.text(), "预留电话"))
+        form.addLayout(self._field("预留电话", self.phone_edit, trailing=[copy_phone]))
+
+        self.email_edit = self._line_edit("例如：backup@example.com")
+        copy_email = IconButton("copy", "复制预留邮箱", box=30, size=15)
+        copy_email.clicked.connect(lambda: self._copy(self.email_edit.text(), "预留邮箱"))
+        form.addLayout(self._field("预留邮箱", self.email_edit, trailing=[copy_email]))
+
         # 网址
         self.url_edit = self._line_edit("https://example.com")
         form.addLayout(self._field("网址", self.url_edit))
@@ -184,8 +196,7 @@ class EntryDialog(QDialog):
         footer_layout.addWidget(save_button)
         root.addWidget(footer)
 
-    def _line_edit(self, placeholder: str):
-        from PySide6.QtWidgets import QLineEdit
+    def _line_edit(self, placeholder: str) -> QLineEdit:
         edit = QLineEdit()
         edit.setPlaceholderText(placeholder)
         edit.setMinimumHeight(36)
@@ -216,6 +227,8 @@ class EntryDialog(QDialog):
         self.title_edit.setText(self.entry.title)
         self.username_edit.setText(self.entry.username)
         self.password_edit.setText(self.entry.password)
+        self.phone_edit.setText(self.entry.phone)
+        self.email_edit.setText(self.entry.email)
         self.url_edit.setText(self.entry.url)
         self.tags_edit.setText("，".join(self.entry.tags) if self.entry.tags else "")
         self.category_combo.setCurrentText(self.entry.category)
@@ -334,6 +347,8 @@ class EntryDialog(QDialog):
         self.data = {
             "title": title,
             "username": self.username_edit.text().strip(),
+            "phone": self.phone_edit.text().strip(),
+            "email": self.email_edit.text().strip(),
             "url": self.url_edit.text().strip(),
             "notes": self.notes_edit.toPlainText().strip(),
             "category": self.category_combo.currentText().strip() or DEFAULT_CATEGORY,

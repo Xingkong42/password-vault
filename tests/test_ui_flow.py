@@ -26,12 +26,13 @@ for stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel  # noqa: E402
 
 from psvault.core import crypto  # noqa: E402
 from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
+from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
@@ -80,6 +81,8 @@ class UiFlowTest(unittest.TestCase):
             dialog.title_edit.setText(fields.get("title", "新记录"))
             dialog.username_edit.setText(fields.get("username", ""))
             dialog.password_edit.setText(fields.get("password", ""))
+            dialog.phone_edit.setText(fields.get("phone", ""))
+            dialog.email_edit.setText(fields.get("email", ""))
             dialog.url_edit.setText(fields.get("url", ""))
             dialog.notes_edit.setPlainText(fields.get("notes", ""))
             dialog.category_combo.setCurrentText(fields.get("category", "未分类"))
@@ -102,9 +105,12 @@ class UiFlowTest(unittest.TestCase):
         """新建记录必须真正保存用户填写的密码（回归用例）。"""
         entry = self._create_via_dialog(
             title="测试站点", username="tester", password="Str0ng#Pass!2024",
+            phone="13800000000", email="backup@example.com",
             url="https://example.com", tags="标签一，标签二", category="开发")
         self.assertEqual(entry.title, "测试站点")
         self.assertEqual(entry.password, "Str0ng#Pass!2024")
+        self.assertEqual(entry.phone, "13800000000")
+        self.assertEqual(entry.email, "backup@example.com")
         self.assertEqual(entry.tags, ["标签一", "标签二"])
         self.assertEqual(entry.category, "开发")
         self.assertIn("开发", self.vault.categories)
@@ -112,6 +118,7 @@ class UiFlowTest(unittest.TestCase):
         reopened = Vault.open(self.path, "FlowTest#2024")
         stored = reopened.active_entries()[-1]
         self.assertEqual(stored.password, "Str0ng#Pass!2024")
+        self.assertEqual(stored.email, "backup@example.com")
 
     def test_02_edit_entry_and_history(self) -> None:
         """编辑时改密码应写入密码历史。"""
@@ -284,6 +291,67 @@ class UiFlowTest(unittest.TestCase):
         titles = [self.vault.find(eid).title for eid in self.window._cards]
         self.assertIn("弱密码", titles)
         self.assertNotIn("强密码", titles)
+
+    def test_11_detail_shows_contact_fields(self) -> None:
+        """详情页展示预留电话与预留邮箱。"""
+        entry = self._create_via_dialog(title="联系信息", username="login_name",
+                                        phone="13900000000", email="spare@example.com")
+        self.window.select_entry(entry.id)
+        pump()
+        texts = [label.text() for label in self.window.detail_host.findChildren(QLabel)]
+        self.assertIn("13900000000", texts)
+        self.assertIn("spare@example.com", texts)
+        self.assertIn("预留电话", texts)
+        self.assertIn("预留邮箱", texts)
+
+    def test_12_vault_name_in_title_and_sidebar(self) -> None:
+        """保险箱名称会出现在窗口标题与侧栏。"""
+        self.vault.set_name("工作保险箱")
+        self.vault.save()
+        self.window.reload_all()
+        pump()
+        self.assertEqual(self.window.brand_label.text(), "工作保险箱")
+        self.assertIn("工作保险箱", self.window.windowTitle())
+
+    def test_13_category_dialog_flow(self) -> None:
+        """分类管理：新建 / 重命名 / 删除，删除后记录归入未分类。"""
+        dialog = CategoryDialog(self.window, self.vault)
+        self.assertIn("密钥", self.vault.categories)      # 默认自带
+
+        self.assertTrue(dialog.add_category("设备"))
+        self.assertFalse(dialog.add_category("设备"))      # 重复
+        self.assertIn("设备", self.vault.categories)
+
+        entry = self._create_via_dialog(title="路由器", category="设备")
+        self.assertTrue(dialog.rename_category("设备", "网络设备"))
+        self.assertIn("网络设备", self.vault.categories)
+        self.assertEqual(self.vault.find(entry.id).category, "网络设备")
+
+        self.assertFalse(dialog.remove_category("未分类"))  # 系统分类不可删
+        self.assertTrue(dialog.remove_category("网络设备"))
+        self.assertNotIn("网络设备", self.vault.categories)
+        self.assertEqual(self.vault.find(entry.id).category, "未分类")
+
+        # 删除后重新打开文件，分类变更已被持久化
+        reopened = Vault.open(self.path, "FlowTest#2024")
+        self.assertNotIn("网络设备", reopened.categories)
+        dialog.deleteLater()
+        pump()
+
+    def test_14_category_dialog_renders_rows(self) -> None:
+        """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""
+        dialog = CategoryDialog(self.window, self.vault)
+        dialog.show()
+        pump()
+        # 列表末尾是一个 stretch，其余每个位置对应一个分类
+        rows = [dialog.list_layout.itemAt(i).widget()
+                for i in range(dialog.list_layout.count() - 1)]
+        self.assertEqual(len(rows), len(self.vault.categories))
+        self.assertTrue(all(row is not None for row in rows))
+        self.assertIn("密钥", self.vault.categories)
+        dialog.hide()
+        dialog.deleteLater()
+        pump()
 
 
 if __name__ == "__main__":

@@ -14,12 +14,18 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import crypto, strength
-from ..core.storage import Vault, default_vault_path
+from ..core.storage import (
+    DEFAULT_DATA_DIR,
+    Vault,
+    default_vault_path,
+    sanitize_filename,
+)
 from . import icons, widgets
 from .theme import Theme
 from .widgets import SecretLineEdit, StrengthMeter, text_button
@@ -63,6 +69,7 @@ class UnlockDialog(QDialog):
         self.vault: Vault | None = None
         self.path = Path(path) if path else last_vault_path()
         self.mode = "unlock" if self.path.exists() else "create"
+        self._path_touched = path is not None    # 用户是否已手动指定过文件位置
 
         self.setWindowTitle("密码保险箱")
         self.setWindowIcon(icons.app_icon())
@@ -106,6 +113,19 @@ class UnlockDialog(QDialog):
         card_layout.addWidget(self.subtitle_label)
         card_layout.addSpacing(24)
 
+        # 保险箱名称（仅创建模式显示）
+        self.name_caption = QLabel("保险箱名称")
+        self.name_caption.setObjectName("FieldLabel")
+        card_layout.addWidget(self.name_caption)
+        card_layout.addSpacing(6)
+        self.name_edit = QLineEdit()
+        self.name_edit.setMinimumHeight(40)
+        self.name_edit.setPlaceholderText("例如：我的密码库（留空则使用文件名）")
+        self.name_edit.setClearButtonEnabled(True)
+        self.name_edit.textChanged.connect(self._on_name_changed)
+        card_layout.addWidget(self.name_edit)
+        card_layout.addSpacing(14)
+
         # 主密码
         password_caption = QLabel("主密码")
         password_caption.setObjectName("FieldLabel")
@@ -145,10 +165,10 @@ class UnlockDialog(QDialog):
         self.error_label.setObjectName("Danger")
         self.error_label.setWordWrap(True)
         self.error_label.setMinimumHeight(18)
-        card_layout.addSpacing(10)
+        card_layout.addSpacing(8)
         card_layout.addWidget(self.error_label)
 
-        card_layout.addSpacing(12)
+        card_layout.addSpacing(4)
         self.primary_button = text_button("解锁", kind="Primary", icon_name="unlock",
                                           token="accent_text", size=17)
         self.primary_button.setMinimumHeight(40)
@@ -175,7 +195,7 @@ class UnlockDialog(QDialog):
         separator = QLabel("·")
         separator.setObjectName("Faint")
         switch_row.addWidget(separator)
-        self.browse_button = text_button("选择其他文件…", kind="Link")
+        self.browse_button = text_button("选择其他保险箱…", kind="Link")
         self.browse_button.clicked.connect(self._browse)
         switch_row.addWidget(self.browse_button)
         switch_row.addStretch(1)
@@ -212,11 +232,10 @@ class UnlockDialog(QDialog):
     def _apply_mode(self) -> None:
         """根据当前模式调整文案与可见控件。"""
         creating = self.mode == "create"
-        is_default_path = self.path == default_vault_path()
 
         self.title_label.setText("创建保险箱" if creating else "解锁保险箱")
         if creating:
-            self.subtitle_label.setText("设置一个足够强的主密码，它只存在于你的记忆里")
+            self.subtitle_label.setText("给保险箱起个名字，再设置一个只属于你的主密码")
             self.primary_button.setText("创建保险箱")
             self.primary_button.setIcon(icons.icon("shield-check", "accent_text", 17))
             self.switch_button.setText("已有保险箱？改为解锁")
@@ -227,22 +246,41 @@ class UnlockDialog(QDialog):
             self.primary_button.setIcon(icons.icon("unlock", "accent_text", 17))
             self.switch_button.setText("新建一个保险箱")
 
-        for widget in (self.confirm_caption, self.confirm_edit, self.strength_meter,
-                       self.strength_hint):
+        for widget in (self.name_caption, self.name_edit, self.confirm_caption,
+                       self.confirm_edit, self.strength_meter, self.strength_hint):
             widget.setVisible(creating)
+        self.layout().invalidate()      # 让隐藏/显示后的尺寸重新参与计算
 
-        name = self.path.name
-        location = "默认位置" if is_default_path else shorten_path(str(self.path.parent))
-        self.path_label.setText(f"数据文件：{name}\n{location}")
-        self.path_label.setToolTip(str(self.path))
-
+        self._update_path_label()
         self.error_label.setText("")
         self.password_edit.clear()
         self.confirm_edit.clear()
         self.strength_meter.set_state(0, "")
         self.strength_hint.setText("")
         self._fit_height()
-        self.password_edit.setFocus()
+        if creating:
+            self.name_edit.setFocus()
+        else:
+            self.password_edit.setFocus()
+
+    def _update_path_label(self) -> None:
+        """刷新底部的数据文件显示。"""
+        is_default_dir = self.path.parent == DEFAULT_DATA_DIR
+        location = "默认位置" if is_default_dir else shorten_path(str(self.path.parent))
+        self.path_label.setText(f"数据文件：{self.path.name}\n{location}")
+        self.path_label.setToolTip(str(self.path))
+
+    def _on_name_changed(self, text: str) -> None:
+        """创建时按名称推荐同名的默认文件名（用户手动选过位置则不再改动）。"""
+        self.error_label.setText("")
+        if self.mode != "create" or self._path_touched:
+            return
+        name = text.strip()
+        if name:
+            self.path = DEFAULT_DATA_DIR / f"{sanitize_filename(name)}{crypto.VAULT_EXTENSION}"
+        else:
+            self.path = default_vault_path()
+        self._update_path_label()
 
     def _toggle_mode(self) -> None:
         if self.mode == "unlock":
@@ -263,6 +301,7 @@ class UnlockDialog(QDialog):
         if selected:
             self.path = Path(selected)
             self.mode = "unlock"
+            self._path_touched = True
             remember_vault_path(self.path)
             self._apply_mode()
             return
@@ -276,6 +315,7 @@ class UnlockDialog(QDialog):
                 target = target.with_suffix(crypto.VAULT_EXTENSION)
             self.path = target
             self.mode = "create"
+            self._path_touched = True
             self._apply_mode()
 
     # ------------------------------------------------------------ 输入反馈
@@ -363,12 +403,12 @@ class UnlockDialog(QDialog):
             self._show_error("这个主密码太弱了，建议至少 12 位并混合大小写、数字与符号")
             return
         if self.path.exists():
-            self._show_error("该位置已存在保险箱文件，请换一个文件名")
+            self._show_error("该位置已存在保险箱文件，请换一个名称或文件名")
             return
 
         self._set_busy(True, "正在创建…")
         try:
-            vault = Vault.create(self.path, password)
+            vault = Vault.create(self.path, password, name=self.name_edit.text().strip())
         except OSError as exc:
             self._set_busy(False)
             self._show_error(f"创建失败：{exc}")

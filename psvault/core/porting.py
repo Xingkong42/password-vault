@@ -13,8 +13,11 @@ from typing import Any, Iterable
 
 from .models import DEFAULT_CATEGORY, Entry
 
-# 导出时的列顺序
-CSV_COLUMNS = ["title", "username", "password", "url", "category", "tags", "notes", "totp_secret"]
+# 导出时的列顺序。
+# 预留电话 / 邮箱使用 reserve_ 前缀：其他密码管理器常把 email 列当作登录账号，
+# 用不同列名可以保证"导出再导入"不会串位。
+CSV_COLUMNS = ["title", "username", "password", "reserve_phone", "reserve_email",
+               "url", "category", "tags", "notes", "totp_secret"]
 
 # 各方面可能出现的列名（含常见中文表头），全部小写匹配
 COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
@@ -23,6 +26,10 @@ COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
     "username": ("username", "user", "userid", "login", "loginname", "email",
                  "e-mail", "account_name", "用户名", "账号", "登录名", "邮箱"),
     "password": ("password", "pass", "pwd", "passwd", "密码", "口令"),
+    "phone": ("reserve_phone", "phone", "mobile", "tel", "telephone", "cellphone",
+              "预留电话", "备用电话", "联系电话", "手机号", "手机", "电话"),
+    "email": ("reserve_email", "backup_email", "spare_email", "email2",
+              "预留邮箱", "备用邮箱", "邮箱地址", "联系邮箱"),
     "url": ("url", "uri", "website", "site", "web", "link", "loginurl",
             "网址", "网站", "链接"),
     "category": ("category", "folder", "group", "type", "分类", "文件夹", "分组"),
@@ -64,6 +71,8 @@ def export_csv(entries: Iterable[Entry], path: str | Path) -> int:
                 "title": entry.title,
                 "username": entry.username,
                 "password": entry.password,
+                "reserve_phone": entry.phone,
+                "reserve_email": entry.email,
                 "url": entry.url,
                 "category": entry.category,
                 "tags": ",".join(entry.tags),
@@ -123,6 +132,8 @@ def import_csv(path: str | Path) -> list[Entry]:
             title=title,
             username=data.get("username", ""),
             password=data.get("password", ""),
+            phone=data.get("phone", ""),
+            email=data.get("email", ""),
             url=data.get("url", ""),
             notes=data.get("notes", ""),
             category=data.get("category") or DEFAULT_CATEGORY,

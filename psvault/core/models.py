@@ -58,6 +58,8 @@ class Entry:
     title: str = ""
     username: str = ""
     password: str = ""
+    phone: str = ""          # 预留电话
+    email: str = ""          # 预留邮箱
     url: str = ""
     notes: str = ""
     category: str = DEFAULT_CATEGORY
@@ -119,6 +121,8 @@ class Entry:
         parts = [
             self.title,
             self.username,
+            self.phone,
+            self.email,
             self.url,
             self.notes,
             self.category,
@@ -149,6 +153,8 @@ class Entry:
             "title": self.title,
             "username": self.username,
             "password": self.password,
+            "phone": self.phone,
+            "email": self.email,
             "url": self.url,
             "notes": self.notes,
             "category": self.category or DEFAULT_CATEGORY,
@@ -173,6 +179,8 @@ class Entry:
             title=str(data.get("title", "")),
             username=str(data.get("username", "")),
             password=str(data.get("password", "")),
+            phone=str(data.get("phone", "")),
+            email=str(data.get("email", "")),
             url=str(data.get("url", "")),
             notes=str(data.get("notes", "")),
             category=str(data.get("category") or DEFAULT_CATEGORY),

@@ -246,6 +246,9 @@ class StrengthMeter(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if not self._label:
+            return          # 没有内容时不绘制，免得看起来像一条多余的分隔线
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
@@ -258,16 +261,14 @@ class StrengthMeter(QWidget):
 
         # 已点亮的段数：0 分点亮 1 段，4 分点亮全部
         filled = self._score + 1 if self._score < 4 else 4
-        active = theme.hex(STRENGTH_TOKENS[self._score]) if self._label else theme.hex("border")
         painter.setBrush(QColor(theme.hex("hover")))
         for index in range(self._segments):
             x = index * (seg_width + gap)
             painter.drawRoundedRect(int(x), 0, int(seg_width), height, 3, 3)
-        if self._label:
-            painter.setBrush(QColor(active))
-            for index in range(filled):
-                x = index * (seg_width + gap)
-                painter.drawRoundedRect(int(x), 0, int(seg_width), height, 3, 3)
+        painter.setBrush(QColor(theme.hex(STRENGTH_TOKENS[self._score])))
+        for index in range(filled):
+            x = index * (seg_width + gap)
+            painter.drawRoundedRect(int(x), 0, int(seg_width), height, 3, 3)
         painter.end()
 
 

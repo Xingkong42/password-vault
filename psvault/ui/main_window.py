@@ -26,6 +26,7 @@ from ..core.models import DEFAULT_CATEGORY, Entry
 from ..core.storage import Vault
 from . import icons, widgets
 from .audit_dialog import AuditDialog
+from .category_dialog import CategoryDialog
 from .entry_dialog import EntryDialog
 from .generator_dialog import GeneratorDialog
 from .settings_dialog import SettingsDialog
@@ -141,6 +142,8 @@ class MainWindow(QWidget):
         self._install_shortcuts()
         self._start_timers()
         self.reload_all()
+        if self.vault.dirty:      # 老数据文件刚做过升级迁移，落盘固化
+            self._save_vault()
 
     # ============================================================ 构建界面
 
@@ -177,10 +180,10 @@ class MainWindow(QWidget):
         logo = QLabel()
         logo.setPixmap(icons.build_logo(Theme.instance().hex("accent"), 26))
         brand.addWidget(logo)
-        name = QLabel("密码保险箱")
-        name.setObjectName("AppTitle")
-        brand.addWidget(name)
-        brand.addStretch(1)
+        self.brand_label = QLabel(self.vault.name)
+        self.brand_label.setObjectName("AppTitle")
+        self.brand_label.setToolTip(f"保险箱：{self.vault.name}\n文件：{self.vault.path}")
+        brand.addWidget(self.brand_label, 1)
         layout.addLayout(brand)
         layout.addSpacing(14)
 
@@ -205,6 +208,9 @@ class MainWindow(QWidget):
         category_header.setContentsMargins(4, 0, 0, 0)
         category_header.addWidget(widgets.section_title("分类"))
         category_header.addStretch(1)
+        manage_category = IconButton("settings", "管理分类（新建 / 重命名 / 删除）", box=24, size=14)
+        manage_category.clicked.connect(self.manage_categories)
+        category_header.addWidget(manage_category)
         add_category = IconButton("plus", "新建分类", box=24, size=14)
         add_category.clicked.connect(self._add_category)
         category_header.addWidget(add_category)
@@ -370,10 +376,19 @@ class MainWindow(QWidget):
 
     def reload_all(self) -> None:
         """重建侧栏、列表与详情。"""
+        self._refresh_title()
         self._refresh_sidebar()
         self.refresh_list()
         self.refresh_detail()
         self._refresh_status()
+
+    def _refresh_title(self) -> None:
+        """窗口标题与侧栏名称跟随保险箱名称。"""
+        name = self.vault.name
+        self.setWindowTitle(f"{name} — 密码保险箱")
+        if getattr(self, "brand_label", None) is not None:
+            self.brand_label.setText(name)
+            self.brand_label.setToolTip(f"保险箱：{name}\n文件：{self.vault.path}")
 
     def _refresh_sidebar(self) -> None:
         stats = self.vault.statistics()
@@ -386,10 +401,7 @@ class MainWindow(QWidget):
         self.nav_items["audit"].set_count(issue_count)
 
         for key, item in self.nav_items.items():
-            active = self.filter_kind == key
-            item.setChecked(active)
-            if active:
-                item.set_icon_name(item._icon_name)
+            item.setChecked(self.filter_kind == key)
 
         # 分类
         while self.category_layout.count():
@@ -620,6 +632,14 @@ class MainWindow(QWidget):
         if entry.password:
             self._password_row = self._build_password_row(entry)
             self.detail_layout.addWidget(self._password_row)
+        if entry.phone:
+            row = FieldRow("预留电话", entry.phone, "phone",
+                           [("copy", "复制预留电话", lambda: self.copy_text(entry.phone, "预留电话"))])
+            self.detail_layout.addWidget(row)
+        if entry.email:
+            row = FieldRow("预留邮箱", entry.email, "mail",
+                           [("copy", "复制预留邮箱", lambda: self.copy_text(entry.email, "预留邮箱"))])
+            self.detail_layout.addWidget(row)
         if entry.url:
             row = FieldRow("网址", entry.url, "globe", [
                 ("link", "在浏览器中打开", lambda: QDesktopServices.openUrl(QUrl(self._normalize_url(entry.url)))),
@@ -814,6 +834,8 @@ class MainWindow(QWidget):
                 title=dialog.data["title"],
                 username=dialog.data["username"],
                 password=dialog.new_password or "",
+                phone=dialog.data["phone"],
+                email=dialog.data["email"],
                 url=dialog.data["url"],
                 notes=dialog.data["notes"],
                 category=dialog.data["category"],
@@ -1052,6 +1074,16 @@ class MainWindow(QWidget):
 
     def open_generator(self) -> None:
         GeneratorDialog.get_password(self)
+
+    def manage_categories(self) -> None:
+        """打开分类管理窗口（新建 / 重命名 / 删除）。"""
+        dialog = CategoryDialog(self, self.vault)
+        dialog.data_changed.connect(self.reload_all)
+        dialog.exec()
+        if self.filter_kind == "category" and self.filter_value not in self.vault.categories:
+            self.filter_kind = "all"
+            self.filter_value = ""
+        self.reload_all()
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self, self.vault)
