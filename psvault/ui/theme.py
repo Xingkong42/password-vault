@@ -161,6 +161,29 @@ QToolTip {
 #Mono { font-family: $mono; color: $text; }
 #Danger { color: $danger; }
 #Success { color: $success; }
+#Warning { color: $warning; }
+
+/* ---------------------------------------------------------- 风险提示
+   详情页顶部的风险横幅、审计视图列表里的风险标签都走这套样式 */
+#RiskBanner {
+    background: $warning_soft;
+    border: 1px solid $border;
+    border-radius: 10px;
+}
+#RiskBanner[level="high"] { background: $danger_soft; }
+
+#RiskTitle { font-size: 14px; font-weight: 600; color: $warning; }
+#RiskTitle[level="high"] { color: $danger; }
+
+#RiskText { font-size: 13px; color: $text; }
+
+#RiskDot { font-size: 9px; color: $warning; }
+#RiskDot[level="high"] { color: $danger; }
+#RiskDot[level="info"] { color: $text_faint; }
+
+#RiskTag { font-size: 12px; font-weight: 600; color: $warning; }
+#RiskTag[level="high"] { color: $danger; }
+#RiskTag[level="info"] { color: $text_faint; }
 #FieldLabel { color: $text_faint; font-size: 12px; }
 #FieldValue { font-size: 14px; color: $text; }
 #EmptyTitle { font-size: 15px; font-weight: 600; color: $text_muted; }

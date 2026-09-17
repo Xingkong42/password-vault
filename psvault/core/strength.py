@@ -156,7 +156,7 @@ def audit(entries: list, max_age_days: int = 180) -> dict[str, list]:
 
     参数 entries 为 models.Entry 列表（仅传入未删除的条目）。
     """
-    weak = [e for e in entries if evaluate(e.password).score <= 1]
+    weak = [e for e in entries if e.password and evaluate(e.password).score <= 1]
 
     buckets: dict[str, list] = {}
     for entry in entries:
@@ -164,7 +164,129 @@ def audit(entries: list, max_age_days: int = 180) -> dict[str, list]:
             buckets.setdefault(entry.password, []).append(entry)
     reused = [group for group in buckets.values() if len(group) > 1]
 
-    aged = [e for e in entries if max_age_days > 0 and e.age_days() >= max_age_days]
+    aged = [e for e in entries if e.password and max_age_days > 0
+            and e.age_days() >= max_age_days]
     empty = [e for e in entries if not e.password]
 
     return {"weak": weak, "reused": reused, "aged": aged, "empty": empty}
+
+
+# ---------------------------------------------------------------- 单条记录体检
+
+# 严重程度排序：数字越小越需要优先处理
+SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
+
+SEVERITY_LABELS = {
+    "high": "风险",
+    "medium": "注意",
+    "low": "建议",
+    "info": "提示",
+}
+
+# 列表卡片上用的短标签
+ISSUE_SHORT_LABELS = {
+    "weak": "弱密码",
+    "reused": "重复使用",
+    "aged": "久未更新",
+    "empty": "未设密码",
+    "suggest": "可优化",
+}
+
+# 审计分组：key -> (标题, 图标, 一句话说明)
+ISSUE_GROUPS = (
+    ("weak", "弱密码", "alert", "这些密码很容易被字典或暴力破解猜到"),
+    ("reused", "重复使用的密码", "copy", "一处泄漏会连带其他账号一起失守"),
+    ("aged", "长期未更换", "clock", "建议定期更换重要账号的密码"),
+    ("empty", "未设置密码", "info", "这些记录还没有保存密码"),
+    ("suggest", "可以更好", "sparkles", "不影响使用，但做了会更安全"),
+)
+
+
+@dataclass
+class Issue:
+    """一条记录身上的具体问题——用来回答"风险到底在哪"。"""
+
+    kind: str          # weak / reused / aged / empty / suggest
+    severity: str      # high / medium / low / info
+    title: str         # 一句话结论，如「密码强度较弱」
+    detail: str = ""   # 具体原因，如「长度不足 8 位；包含键盘连续序列」
+
+    @property
+    def is_risk(self) -> bool:
+        """是否需要优先处理（info 级别的只是建议）。"""
+        return self.severity != "info"
+
+    @property
+    def severity_label(self) -> str:
+        return SEVERITY_LABELS.get(self.severity, "提示")
+
+    @property
+    def short_label(self) -> str:
+        return ISSUE_SHORT_LABELS.get(self.kind, "问题")
+
+
+def entry_issues(entry, entries: list, max_age_days: int = 180) -> list[Issue]:
+    """检查单条记录，返回它存在的全部问题（按严重程度排序）。
+
+    这是审计视图、详情页风险提示共用的判定逻辑，保证两处口径一致。
+    """
+    issues: list[Issue] = []
+
+    if not entry.password:
+        issues.append(Issue(
+            kind="empty", severity="medium",
+            title="未设置密码",
+            detail="这条记录还没有保存密码，无法评估强度",
+        ))
+        return issues
+
+    report = evaluate(entry.password)
+    if report.score <= 1:
+        reason = "；".join(report.warnings[:3]) or "密码过于简单"
+        issues.append(Issue(
+            kind="weak", severity="high",
+            title=f"弱密码（强度{report.label}）",
+            detail=reason,
+        ))
+    elif report.score == 2:
+        reason = "；".join(report.suggestions[:2]) or "建议加长或增加字符种类"
+        issues.append(Issue(
+            kind="suggest", severity="info",
+            title="密码强度一般",
+            detail=reason,
+        ))
+
+    same = [e for e in entries
+            if e.id != entry.id and e.password and e.password == entry.password]
+    if same:
+        names = "、".join(e.title for e in same[:3])
+        more = f" 等 {len(same)} 条" if len(same) > 3 else ""
+        issues.append(Issue(
+            kind="reused", severity="high",
+            title=f"与 {len(same)} 条记录使用了相同密码",
+            detail=f"重复的账号：{names}{more}。一旦其中一处泄漏，其余账号会一并失守",
+        ))
+
+    if max_age_days > 0:
+        days = entry.age_days()
+        if days >= max_age_days:
+            issues.append(Issue(
+                kind="aged", severity="medium",
+                title=f"已 {days} 天未修改密码",
+                detail=f"超过设定的 {max_age_days} 天，建议定期更换",
+            ))
+
+    if not entry.totp_secret:
+        issues.append(Issue(
+            kind="suggest", severity="info",
+            title="未启用两步验证",
+            detail="支持两步验证的网站建议开启，密钥可保存在本记录中",
+        ))
+
+    issues.sort(key=lambda item: SEVERITY_ORDER.get(item.severity, 9))
+    return issues
+
+
+def risk_entries(entries: list, max_age_days: int = 180) -> list:
+    """筛出存在风险（不含纯建议）的记录，供审计视图使用。"""
+    return [e for e in entries if any(i.is_risk for i in entry_issues(e, entries, max_age_days))]

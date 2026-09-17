@@ -16,7 +16,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QScrollArea,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -59,11 +62,24 @@ class SettingsDialog(QDialog):
         root.addWidget(title)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_general_tab(), "常规")
-        tabs.addTab(self._build_security_tab(), "安全")
-        tabs.addTab(self._build_data_tab(), "数据")
-        tabs.addTab(self._build_about_tab(), "关于")
+        tabs.addTab(self._scrollable(self._build_general_tab()), "常规")
+        tabs.addTab(self._scrollable(self._build_security_tab()), "安全")
+        tabs.addTab(self._scrollable(self._build_data_tab()), "数据")
+        tabs.addTab(self._scrollable(self._build_about_tab()), "关于")
         root.addWidget(tabs, 1)
+
+    def _scrollable(self, page: QWidget) -> QWidget:
+        """给设置页套一层滚动区域。
+
+        选项多起来之后内容会超过窗口高度，没有滚动区时 Qt 会把卡片压扁，
+        出现文字与按钮互相重叠的情况。
+        """
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
 
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -300,6 +316,8 @@ class SettingsDialog(QDialog):
             "以及本程序导出的 JSON；同名同账号的记录会自动跳过。"))
         layout.addWidget(card)
 
+        layout.addWidget(self._build_backup_card())
+
         card, card_layout = self._card("数据文件")
         path_label = QLabel(str(self.vault.path))
         path_label.setObjectName("Mono")
@@ -309,12 +327,174 @@ class SettingsDialog(QDialog):
         open_dir = text_button("打开所在文件夹", icon_name="folder", size=15)
         open_dir.clicked.connect(self._open_folder)
         card_layout.addWidget(open_dir)
-        card_layout.addWidget(widgets.hint_label(
-            "每次保存都会生成同名 .bak 备份，误操作时可以手动恢复。"))
         layout.addWidget(card)
 
         layout.addStretch(1)
         return page
+
+    def _build_backup_card(self) -> QFrame:
+        """备份与恢复：自动备份策略 + 备份列表 + 一键恢复。"""
+        card, card_layout = self._card("备份与恢复")
+
+        self.backup_check = QCheckBox("每次保存前自动留一份历史备份")
+        self.backup_check.setChecked(self.vault.settings.auto_backup)
+        card_layout.addWidget(self.backup_check)
+
+        self.backup_keep_spin = QSpinBox()
+        self.backup_keep_spin.setRange(1, 50)
+        self.backup_keep_spin.setSuffix(" 份")
+        self.backup_keep_spin.setValue(self.vault.settings.backup_keep)
+        card_layout.addLayout(self._row(
+            "每个位置保留", self.backup_keep_spin,
+            "超出份数的旧备份会自动清理，不会无限占用磁盘。"))
+
+        self.external_check = QCheckBox("同时在「文档」目录保留一份（推荐）")
+        self.external_check.setChecked(self.vault.settings.backup_external_enabled)
+        self.external_check.stateChanged.connect(self._on_external_toggled)
+        card_layout.addWidget(self.external_check)
+
+        self.external_label = QLabel(self._external_dir_text())
+        self.external_label.setObjectName("Faint")
+        self.external_label.setWordWrap(True)
+        card_layout.addWidget(self.external_label)
+
+        external_row = QHBoxLayout()
+        external_row.setSpacing(8)
+        open_external = text_button("打开该文件夹", icon_name="folder", size=15)
+        open_external.clicked.connect(self._open_external_dir)
+        external_row.addWidget(open_external)
+        choose_external = text_button("更改位置…", icon_name="pencil", size=15)
+        choose_external.clicked.connect(self._choose_external_dir)
+        external_row.addWidget(choose_external)
+        external_row.addStretch(1)
+        card_layout.addLayout(external_row)
+
+        card_layout.addWidget(widgets.hint_label(
+            "程序目录和文档目录各存一份：即使整个程序文件夹被误删，"
+            "文档里的备份仍然可以恢复数据。备份文件同样是加密的。"))
+
+        card_layout.addWidget(widgets.divider())
+        card_layout.addWidget(widgets.section_title("历史备份"))
+
+        self.backup_list = QListWidget()
+        self.backup_list.setFixedHeight(118)
+        card_layout.addWidget(self.backup_list)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        backup_now = text_button("立即备份", icon_name="shield-check", size=15)
+        backup_now.clicked.connect(self._backup_now)
+        action_row.addWidget(backup_now)
+        self.restore_button = text_button("恢复选中备份", kind="Danger",
+                                          icon_name="restore", token="danger", size=15)
+        self.restore_button.clicked.connect(self._restore_selected)
+        action_row.addWidget(self.restore_button)
+        action_row.addStretch(1)
+        card_layout.addLayout(action_row)
+
+        self._refresh_backup_list()
+        return card
+
+    def _external_dir_text(self) -> str:
+        manager = self.vault.backup_manager()
+        if manager.external_dir is None:
+            return "外部备份：已关闭"
+        return f"外部备份位置：{manager.external_dir}"
+
+    def _refresh_backup_list(self) -> None:
+        """刷新备份列表（本地 + 外部，按时间倒序）。"""
+        self.backup_list.clear()
+        backups = self.vault.backup_manager().list()
+        if not backups:
+            item = QListWidgetItem("还没有备份——保存一次记录后就会出现")
+            item.setFlags(Qt.NoItemFlags)
+            self.backup_list.addItem(item)
+            self.restore_button.setEnabled(False)
+            return
+
+        self.restore_button.setEnabled(True)
+        for info in backups[:30]:
+            entry = QListWidgetItem(
+                f"{info.location}　{info.display_time()}　{info.display_size()}")
+            entry.setData(Qt.UserRole, str(info.path))
+            entry.setToolTip(str(info.path))
+            self.backup_list.addItem(entry)
+        self.backup_list.setCurrentRow(0)
+
+    def _on_external_toggled(self) -> None:
+        self.external_label.setText(
+            self._external_dir_text() if self.external_check.isChecked()
+            else "外部备份：已关闭")
+
+    def _open_external_dir(self) -> None:
+        manager = self.vault.backup_manager()
+        target = manager.external_dir
+        if target is None:
+            QMessageBox.information(self, "外部备份已关闭", "请先勾选上方的选项。")
+            return
+        target.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def _choose_external_dir(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择外部备份目录", str(self.vault.backup_manager().external_dir
+                                          or self.vault.path.parent))
+        if not selected:
+            return
+        self.vault.settings.backup_external_dir = selected
+        self.vault.settings.backup_external_enabled = True
+        self.external_check.setChecked(True)
+        self.external_label.setText(self._external_dir_text())
+
+    def _apply_backup_settings(self) -> None:
+        """把界面上的备份选项写回设置。"""
+        settings = self.vault.settings
+        settings.auto_backup = self.backup_check.isChecked()
+        settings.backup_keep = self.backup_keep_spin.value()
+        settings.backup_external_enabled = self.external_check.isChecked()
+
+    def _backup_now(self) -> None:
+        self._apply_backup_settings()
+        self.vault.save()
+        written = self.vault.backup_manager().backup(force=True)
+        self._refresh_backup_list()
+        if written:
+            QMessageBox.information(
+                self, "备份完成",
+                "已生成 %d 份备份：\n%s" % (len(written), "\n".join(str(p) for p in written)))
+        else:
+            QMessageBox.warning(self, "备份失败", "没有写出任何备份文件，请检查目录权限。")
+
+    def _restore_selected(self) -> None:
+        item = self.backup_list.currentItem()
+        if item is None:
+            return
+        source = item.data(Qt.UserRole)
+        if not source:
+            return
+        answer = QMessageBox.warning(
+            self, "从备份恢复",
+            "将用这份备份覆盖当前保险箱，当前内容会先自动另存一份。\n\n"
+            f"{source}\n\n确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.vault.restore_backup(source)
+        except crypto.InvalidPassword:
+            QMessageBox.warning(
+                self, "无法直接恢复",
+                "这份备份是用**旧的主密码**加密的，本程序无法自动读取。\n\n"
+                "文件已经覆盖回去了，请关闭程序后用那份备份对应的主密码重新打开。")
+            self.data_changed.emit()
+            self.accept()
+            return
+        except (OSError, crypto.VaultError, ValueError) as exc:
+            QMessageBox.critical(self, "恢复失败", str(exc))
+            return
+        self.data_changed.emit()
+        QMessageBox.information(self, "恢复完成", "已从备份恢复，界面将刷新为备份中的数据。")
+        self.accept()
 
     def _export_encrypted(self) -> None:
         default = str(self.vault.path.with_name(
@@ -451,6 +631,7 @@ class SettingsDialog(QDialog):
         settings.password_max_age_days = self.age_spin.value()
         settings.history_limit = self.history_spin.value()
         settings.theme = "light" if self.theme_group.checkedId() == 0 else "dark"
+        self._apply_backup_settings()
         try:
             self.vault.save()
         except (OSError, crypto.VaultError) as exc:

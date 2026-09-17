@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import crypto
+from .backup import BackupManager, default_external_dir
 from .models import DEFAULT_CATEGORY, Entry, Settings, now_iso
 
 
@@ -193,8 +194,29 @@ class Vault:
             "meta": {**self.meta, "updated_at": now_iso()},
         }
 
+    def backup_manager(self) -> BackupManager:
+        """按当前设置构造备份管理器（设置变了会立即生效）。"""
+        external = None
+        if self.settings.backup_external_enabled:
+            external = self.settings.backup_external_dir or None
+        return BackupManager(self.path,
+                             keep=self.settings.backup_keep,
+                             external_dir=external)
+
+    def verify_file(self, path: str | Path | None = None) -> None:
+        """回读并验证某份文件确实能用当前密钥解开，失败则抛异常。"""
+        target = Path(path) if path else self.path
+        container = json.loads(target.read_text(encoding="utf-8"))
+        crypto.validate_container(container)
+        crypto.decrypt_payload(container, self._key)
+
     def save(self) -> None:
-        """加密并原子写入磁盘（同时保留一份 .bak 备份）。"""
+        """加密并原子写入磁盘。
+
+        顺序：留历史备份 → 写临时文件 → 原子替换 → 回读校验；
+        万一校验不通过（磁盘故障、被其他程序截断等），自动从最新备份回滚，
+        宁可回到上一个可用版本，也不留下一个打不开的文件。
+        """
         if self.is_locked:
             raise crypto.VaultError("保险箱已锁定，无法保存")
         plaintext = json.dumps(self.to_payload(), ensure_ascii=False).encode("utf-8")
@@ -202,18 +224,61 @@ class Vault:
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_name(self.path.name + ".tmp")
-        data = json.dumps(container, ensure_ascii=False, indent=2)
-        tmp_path.write_text(data, encoding="utf-8")
+        tmp_path.write_text(json.dumps(container, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
 
-        # 覆盖前留一份备份，避免写入过程被打断导致数据全失
-        if self.path.exists():
-            backup = self.path.with_name(self.path.name + ".bak")
+        # 覆盖前先留一份带时间戳的历史备份（内容没变化时会自动跳过）
+        if self.settings.auto_backup and self.path.exists():
             try:
-                shutil.copy2(self.path, backup)
+                self.backup_manager().backup()
             except OSError:
-                pass
+                pass                    # 备份失败不应阻断保存本身
+
         os.replace(tmp_path, self.path)
+
+        try:
+            self.verify_file()
+        except Exception as exc:  # noqa: BLE001 - 任何异常都说明新文件不可用
+            restored = self._rollback_from_backup()
+            raise crypto.VaultError(
+                f"写入后的校验没有通过（{exc}）；"
+                + ("已自动从最近的备份恢复上一版数据。" if restored
+                   else "且没有可用备份，请勿继续操作并检查磁盘。")
+            ) from exc
         self.dirty = False
+
+    def restore_backup(self, backup_path: str | Path) -> None:
+        """用一份备份覆盖当前文件，并把数据重新载入内存。
+
+        如果这份备份是用旧主密码加密的，解密会抛 crypto.InvalidPassword，
+        由界面提示用户重新解锁。
+        """
+        self.backup_manager().restore(backup_path)
+
+        container = json.loads(self.path.read_text(encoding="utf-8"))
+        container = crypto.validate_container(container)
+        plaintext = crypto.decrypt_payload(container, self._key)
+        payload = json.loads(plaintext.decode("utf-8"))
+
+        self.entries = [Entry.from_dict(item) for item in payload.get("entries", [])]
+        self.categories = [str(c) for c in payload.get("categories", [])] or [DEFAULT_CATEGORY]
+        if DEFAULT_CATEGORY not in self.categories:
+            self.categories.insert(0, DEFAULT_CATEGORY)
+        self.settings = Settings.from_dict(payload.get("settings", {}))
+        self.meta = payload.get("meta", {}) or {}
+        self._migrate()
+        self.dirty = False
+
+    def _rollback_from_backup(self) -> bool:
+        """用最新备份覆盖当前文件，成功返回 True。"""
+        latest = self.backup_manager().latest()
+        if latest is None:
+            return False
+        try:
+            shutil.copy2(latest.path, self.path)
+            return True
+        except OSError:
+            return False
 
     def change_master_password(self, new_password: str) -> None:
         """更换主密码：换盐、重新派生密钥并落盘。"""
@@ -419,6 +484,22 @@ class Vault:
             "with_totp": sum(1 for e in active if e.totp_secret),
         }
 
-    def backups(self) -> list[Path]:
-        """列出同目录下的备份文件。"""
-        return sorted(self.path.parent.glob(self.path.name + "*"))
+    def ensure_backup_dir(self) -> None:
+        """确保备份目录已确定：首次使用时把外部备份目录设为默认位置。"""
+        if not self.settings.backup_external_dir:
+            self.settings.backup_external_dir = str(default_external_dir())
+            self.dirty = True
+
+    def health(self) -> dict[str, object]:
+        """数据安全状况概览，供界面展示与自查。"""
+        manager = self.backup_manager()
+        backups = manager.list()
+        latest = backups[0] if backups else None
+        return {
+            "path": self.path,
+            "backup_count": len(backups),
+            "backup_latest": latest.display_time() if latest else "",
+            "backup_size": manager.total_size(),
+            "external_dir": manager.external_dir,
+            "external_ready": bool(manager.external_dir and manager.external_dir.is_dir()),
+        }

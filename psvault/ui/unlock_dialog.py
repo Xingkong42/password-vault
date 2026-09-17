@@ -13,13 +13,16 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import crypto, strength
+from ..core.backup import BackupManager, default_external_dir
 from ..core.storage import (
     DEFAULT_DATA_DIR,
     Vault,
@@ -186,6 +189,20 @@ class UnlockDialog(QDialog):
         self.path_label.setAlignment(Qt.AlignCenter)
         card_layout.addWidget(self.path_label)
 
+        # 备份状态 + 恢复入口：文件万一被改动或误删，这里能救回来
+        backup_row = QHBoxLayout()
+        backup_row.setSpacing(6)
+        backup_row.addStretch(1)
+        self.backup_label = QLabel("")
+        self.backup_label.setObjectName("Faint")
+        backup_row.addWidget(self.backup_label)
+        self.restore_link = text_button("从备份恢复…", kind="Link")
+        self.restore_link.clicked.connect(self._restore_from_backup)
+        backup_row.addWidget(self.restore_link)
+        backup_row.addStretch(1)
+        card_layout.addSpacing(4)
+        card_layout.addLayout(backup_row)
+
         switch_row = QHBoxLayout()
         switch_row.setSpacing(14)
         switch_row.addStretch(1)
@@ -269,6 +286,70 @@ class UnlockDialog(QDialog):
         location = "默认位置" if is_default_dir else shorten_path(str(self.path.parent))
         self.path_label.setText(f"数据文件：{self.path.name}\n{location}")
         self.path_label.setToolTip(str(self.path))
+        self._refresh_backup_hint()
+
+    # ------------------------------------------------------------ 备份
+
+    def _backup_manager(self) -> BackupManager:
+        """解锁阶段还读不到保险箱内的设置，外部备份目录取默认位置。"""
+        return BackupManager(self.path, external_dir=default_external_dir())
+
+    def _refresh_backup_hint(self) -> None:
+        """在解锁界面显示备份状况，让用户知道数据有兜底。"""
+        if not self.path.exists():
+            self.backup_label.setText("")
+            self.restore_link.hide()
+            self._fit_height()
+            return
+
+        backups = self._backup_manager().list()
+        if not backups:
+            self.backup_label.setText("尚无备份")
+            self.restore_link.hide()
+        else:
+            self.backup_label.setText(
+                f"备份 {len(backups)} 份　·　最近 {backups[0].display_time()}")
+            self.restore_link.show()
+        self._fit_height()
+
+    def _restore_from_backup(self) -> None:
+        """从备份恢复损坏 / 丢失的保险箱文件。"""
+        manager = self._backup_manager()
+        backups = manager.list()
+        if not backups:
+            QMessageBox.information(self, "没有备份", "没有找到可用的备份文件。")
+            return
+
+        labels = [f"{info.location}　{info.display_time()}　{info.display_size()}"
+                  for info in backups]
+        label, ok = QInputDialog.getItem(
+            self, "从备份恢复", "选择要恢复的备份：", labels, 0, False)
+        if not ok:
+            return
+        info = backups[labels.index(label)]
+
+        answer = QMessageBox.warning(
+            self, "确认恢复",
+            f"将用这份备份覆盖当前保险箱文件：\n{info.path}\n\n"
+            "当前文件会先自动另存一份，确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            manager.restore(info.path)
+        except OSError as exc:
+            QMessageBox.critical(self, "恢复失败", str(exc))
+            return
+
+        QMessageBox.information(
+            self, "恢复完成",
+            "已从备份恢复。\n\n请输入这份备份对应的主密码解锁"
+            "（如果后来改过主密码，请用改之前的那个）。")
+        self.error_label.setText("")
+        self.password_edit.clear()
+        self._refresh_backup_hint()
+        self.password_edit.setFocus()
 
     def _on_name_changed(self, text: str) -> None:
         """创建时按名称推荐同名的默认文件名（用户手动选过位置则不再改动）。"""
@@ -367,14 +448,26 @@ class UnlockDialog(QDialog):
         try:
             vault = Vault.open(self.path, password)
         except crypto.InvalidPassword:
+            # 认证失败有两种可能：密码输错，或文件被改动过（GCM 会一并报错）。
+            # 有备份时把恢复入口指出来，避免用户以为数据已经没了。
             self._set_busy(False)
-            self._show_error("主密码错误，请重试")
+            backups = self._backup_manager().list()
+            if backups:
+                self._show_error(
+                    f"主密码错误。如果确认密码无误，文件可能已被改动——"
+                    f"可点下方「从备份恢复」找回（最近 {backups[0].display_time()}）")
+            else:
+                self._show_error("主密码错误，请重试")
             self.password_edit.selectAll()
             self.password_edit.setFocus()
             return
         except crypto.VaultError as exc:
             self._set_busy(False)
-            self._show_error(str(exc))
+            backups = self._backup_manager().list()
+            if backups:
+                self._show_error(f"{exc}（检测到 {len(backups)} 份备份，可点下方「从备份恢复」）")
+            else:
+                self._show_error(str(exc))
             return
         except OSError as exc:
             self._set_busy(False)

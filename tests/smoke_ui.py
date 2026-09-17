@@ -26,12 +26,11 @@ for stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QTabWidget  # noqa: E402
 
 from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
-from psvault.ui.audit_dialog import AuditDialog  # noqa: E402
 from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.generator_dialog import GeneratorDialog  # noqa: E402
@@ -71,6 +70,8 @@ def build_vault() -> Vault:
     tmp = Path(tempfile.mkdtemp(prefix="psvault-smoke-"))
     path = tmp / "vault.psvault"
     vault = Vault.create(path, "SmokeTest#2024", name="我的密码库")
+    # 外部备份指向临时目录，别把测试数据写进真实的「文档」目录
+    vault.settings.backup_external_dir = str(tmp / "external-backup")
     for entry in SAMPLE:
         vault.add_entry(entry)
     vault.save()
@@ -121,15 +122,33 @@ def main() -> int:
 
         settings = SettingsDialog(window, vault)
         shot(settings, f"settings-{mode}", app)
+        tabs = settings.findChild(QTabWidget)
+        if tabs is not None:                    # 数据页：备份与恢复
+            vault.backup_manager().backup(force=True)
+            tabs.setCurrentIndex(2)
+            settings._refresh_backup_list()
+            shot(settings, f"settings-data-{mode}", app)
+            settings.resize(620, 1000)      # 拉高一次看全（含备份列表）
+            shot(settings, f"settings-data-full-{mode}", app)
+            settings.resize(620, 660)
 
-        audit = AuditDialog(window, vault)
-        shot(audit, f"audit-{mode}", app)
+        # 安全审计视图：右侧是完整的风险报告，而不是记录详情
+        window.set_filter("audit")
+        shot(window, f"audit-{mode}", app)
+
+        # 审计视图下点进某条记录：详情页顶部出现具体风险说明
+        risky = [e for e in vault.active_entries() if not e.password or e.password == "taobao888"]
+        if risky:
+            window.select_entry(risky[0].id)
+            shot(window, f"audit-entry-{mode}", app)
+        window.set_filter("all")
+        window.select_entry(vault.active_entries()[0].id)
 
         editor = EntryDialog(window, vault, vault.active_entries()[0])
         shot(editor, f"editor-{mode}", app)
 
         for widget in (window, unlock, creator, categories, generator,
-                       settings, audit, editor):
+                       settings, editor):
             widget.hide()
             widget.deleteLater()
         app.processEvents()

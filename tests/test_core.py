@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from psvault.core import crypto, generator, porting, storage, strength, totp  # noqa: E402
+from psvault.core.backup import BackupManager  # noqa: E402
 from psvault.core.models import Entry, Settings  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 
@@ -382,6 +385,203 @@ class VaultNameTest(unittest.TestCase):
         self.assertTrue(vault.remove_category("设备"))
         self.assertEqual(entry.category, "未分类")
         self.assertFalse(vault.remove_category("未分类"))       # 系统分类不可删
+
+
+class EntryIssuesTest(unittest.TestCase):
+    """单条记录体检：必须指出问题类型与具体原因。"""
+
+    def test_weak_password_has_reason(self) -> None:
+        entry = Entry(title="A", password="123456")
+        issues = strength.entry_issues(entry, [entry])
+        weak = next((i for i in issues if i.kind == "weak"), None)
+        self.assertIsNotNone(weak)
+        self.assertEqual(weak.severity, "high")
+        self.assertTrue(weak.detail, "必须给出具体原因，而不是只说'有风险'")
+        self.assertTrue(weak.short_label)
+
+    def test_reused_points_to_other_accounts(self) -> None:
+        first = Entry(title="甲站", password="same-pass-1234")
+        second = Entry(title="乙站", password="same-pass-1234")
+        issues = strength.entry_issues(first, [first, second])
+        reused = next((i for i in issues if i.kind == "reused"), None)
+        self.assertIsNotNone(reused)
+        self.assertIn("乙站", reused.detail)
+
+    def test_aged_password(self) -> None:
+        entry = Entry(title="A", password="Xk7#mQ2!vL9$pR4@")
+        old = datetime.now().astimezone() - timedelta(days=400)
+        entry.updated_at = old.isoformat(timespec="seconds")
+        issues = strength.entry_issues(entry, [entry], max_age_days=180)
+        aged = next((i for i in issues if i.kind == "aged"), None)
+        self.assertIsNotNone(aged)
+        self.assertIn("400", aged.title)
+
+    def test_empty_password(self) -> None:
+        entry = Entry(title="A", password="")
+        issues = strength.entry_issues(entry, [entry])
+        self.assertEqual(issues[0].kind, "empty")
+        self.assertTrue(issues[0].is_risk)
+
+    def test_healthy_entry_has_no_risk(self) -> None:
+        entry = Entry(title="A", password="Xk7#mQ2!vL9$pR4@",
+                      totp_secret="JBSWY3DPEHPK3PXP")
+        issues = strength.entry_issues(entry, [entry])
+        self.assertEqual([i for i in issues if i.is_risk], [])
+
+    def test_risk_entries_filters(self) -> None:
+        good = Entry(title="好", password="Xk7#mQ2!vL9$pR4@",
+                     totp_secret="JBSWY3DPEHPK3PXP")
+        bad = Entry(title="坏", password="123456")
+        result = strength.risk_entries([good, bad])
+        self.assertEqual([e.title for e in result], ["坏"])
+
+
+class BackupTest(unittest.TestCase):
+    """自动备份、清理与恢复。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.path = self.dir / "v.psvault"
+        self.external = self.dir / "external"
+        self.vault = Vault.create(self.path, "Master#2024")
+        self.vault.settings.backup_external_dir = str(self.external)
+        self.vault.settings.backup_external_enabled = True
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_backup_skips_unchanged_content(self) -> None:
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+        manager = self.vault.backup_manager()
+        manager.backup(force=True)                  # 先给当前内容留一份
+        self.assertEqual(manager.backup(), [], "内容没变时不该重复备份")
+
+        self.vault.add_entry(Entry(title="B", password="p"))
+        self.vault.save()                           # 保存时又会留一份历史版本
+        self.assertGreater(len(manager.list()), 0)
+
+    def test_backup_written_to_two_locations(self) -> None:
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+        locations = {info.location for info in self.vault.backup_manager().list()}
+        self.assertEqual(locations, {"本地", "外部"})
+        self.assertTrue((self.dir / "backups").is_dir())
+        self.assertTrue(self.external.is_dir())
+
+    def test_prune_keeps_limit(self) -> None:
+        self.vault.settings.backup_keep = 3
+        for index in range(6):
+            self.vault.add_entry(Entry(title=f"E{index}", password="p"))
+            self.vault.save()
+        local = [i for i in self.vault.backup_manager().list() if i.location == "本地"]
+        self.assertLessEqual(len(local), 3)
+
+    def test_deleted_file_can_be_recovered(self) -> None:
+        """误删保险箱文件后，可以从备份目录恢复出来。"""
+        self.vault.add_entry(Entry(title="重要", password="p"))
+        self.vault.save()
+        manager = self.vault.backup_manager()
+        manager.backup(force=True)          # 让备份里确实含有这条数据
+        self.path.unlink()
+
+        backups = manager.list()
+        self.assertTrue(backups, "应该有可用的备份")
+        manager.restore(backups[0].path)
+
+        self.assertTrue(self.path.exists())
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual(reopened.active_entries()[0].title, "重要")
+
+    def test_modified_file_is_detected(self) -> None:
+        """文件被改动后必须解密失败，绝不能静默读出错误数据。"""
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+
+        raw = json.loads(self.path.read_text(encoding="utf-8"))
+        payload = bytearray(raw["payload"].encode())
+        payload[10] = ord("A") if payload[10] != ord("A") else ord("B")
+        raw["payload"] = payload.decode()
+        self.path.write_text(json.dumps(raw), encoding="utf-8")
+
+        with self.assertRaises(crypto.VaultError):
+            Vault.open(self.path, "Master#2024")
+        # 此时仍能从备份把数据找回来
+        backups = self.vault.backup_manager().list()
+        self.assertTrue(backups)
+
+    def test_restore_rolls_data_back(self) -> None:
+        self.vault.add_entry(Entry(title="保留", password="p"))
+        self.vault.save()
+        manager = self.vault.backup_manager()
+        manager.backup(force=True)                  # 备份一份含"保留"的版本
+        snapshot = manager.latest()
+        self.assertIsNotNone(snapshot)
+
+        self.vault.add_entry(Entry(title="后来加的", password="p"))
+        self.vault.save()
+
+        self.vault.restore_backup(snapshot.path)
+        titles = [e.title for e in self.vault.active_entries()]
+        self.assertIn("保留", titles)
+        self.assertNotIn("后来加的", titles)
+        # 磁盘上的文件也确实回去了
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()], ["保留"])
+
+    def test_failed_write_verification_rolls_back(self) -> None:
+        """写入后校验不通过时，应自动回滚到上一个可用版本。"""
+        self.vault.add_entry(Entry(title="第一版", password="p"))
+        self.vault.save()
+        self.vault.add_entry(Entry(title="第二版", password="p"))
+
+        original = Vault.verify_file
+        calls = {"count": 0}
+
+        def flaky(inner_self, path=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise ValueError("模拟磁盘写入异常")
+            return original(inner_self, path)
+
+        Vault.verify_file = flaky
+        try:
+            with self.assertRaises(crypto.VaultError):
+                self.vault.save()
+        finally:
+            Vault.verify_file = original
+
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()], ["第一版"])
+
+    def test_default_external_dir_uses_documents(self) -> None:
+        from psvault.core.backup import default_external_dir
+
+        target = default_external_dir()
+        self.assertIn("密码保险箱备份", str(target))
+
+
+class BackupManagerUnitTest(unittest.TestCase):
+    """备份管理器的独立行为。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_missing_vault_returns_empty(self) -> None:
+        manager = BackupManager(self.dir / "不存在.psvault")
+        self.assertEqual(manager.backup(), [])
+        self.assertEqual(manager.list(), [])
+        self.assertIsNone(manager.latest())
+
+    def test_restore_missing_backup_raises(self) -> None:
+        manager = BackupManager(self.dir / "v.psvault")
+        with self.assertRaises(FileNotFoundError):
+            manager.restore(self.dir / "没有这个文件.psvault")
 
 
 class SettingsTest(unittest.TestCase):

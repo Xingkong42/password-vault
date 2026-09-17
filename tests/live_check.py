@@ -39,6 +39,7 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="psvault-live-"))
     path = tmp / "v.psvault"
     vault = Vault.create(path, "LiveCheck#2024")
+    vault.settings.backup_external_dir = str(tmp / "external-backup")
     vault.add_entry(Entry(title="真实平台自检", username="tester",
                           password="Live#Check2024", url="https://example.com",
                           category="开发", tags=["自检"],

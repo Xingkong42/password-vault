@@ -25,7 +25,7 @@ from ..core import crypto, strength, totp
 from ..core.models import DEFAULT_CATEGORY, Entry
 from ..core.storage import Vault
 from . import icons, widgets
-from .audit_dialog import AuditDialog
+from .audit_panel import AuditPanel
 from .category_dialog import CategoryDialog
 from .entry_dialog import EntryDialog
 from .generator_dialog import GeneratorDialog
@@ -61,6 +61,7 @@ class EntryCard(QFrame):
     menu_requested = Signal(str, QPoint)
 
     def __init__(self, entry: Entry, selected: bool = False,
+                 issues: list | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.entry_id = entry.id
@@ -68,6 +69,8 @@ class EntryCard(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setProperty("selected", "true" if selected else "false")
         self.setFixedHeight(58)
+
+        risks = [i for i in (issues or []) if i.is_risk]
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 6, 10, 6)
@@ -79,13 +82,25 @@ class EntryCard(QFrame):
         column = QVBoxLayout()
         column.setSpacing(2)
         column.setContentsMargins(0, 0, 0, 0)
-        title = QLabel(widgets.elide(entry.title, 22))
+        title = QLabel(widgets.elide(entry.title, 16 if risks else 22))
         title.setObjectName("EntryTitle")
         column.addWidget(title)
-        subtitle = QLabel(widgets.elide(entry.subtitle(), 26))
+        subtitle = QLabel(widgets.elide(entry.subtitle(), 20 if risks else 26))
         subtitle.setObjectName("Faint")
         column.addWidget(subtitle)
         layout.addLayout(column, 1)
+
+        # 审计视图下用紧凑标签直接点名问题，与"全部记录"一眼可分
+        if risks:
+            badge = QLabel(risks[0].short_label)
+            badge.setObjectName("BadgeDanger" if risks[0].severity == "high" else "BadgeWarning")
+            badge.setToolTip(risks[0].title + "：" + risks[0].detail)
+            layout.addWidget(badge, 0, Qt.AlignVCenter)
+            if len(risks) > 1:
+                more = QLabel(f"+{len(risks) - 1}")
+                more.setObjectName("Badge")
+                more.setToolTip("；".join(f"{i.title}：{i.detail}" for i in risks[1:]))
+                layout.addWidget(more, 0, Qt.AlignVCenter)
 
         if entry.totp_secret:
             marker = QLabel()
@@ -141,8 +156,9 @@ class MainWindow(QWidget):
         self._build_ui()
         self._install_shortcuts()
         self._start_timers()
+        self.vault.ensure_backup_dir()      # 首次使用时确定外部备份位置
         self.reload_all()
-        if self.vault.dirty:      # 老数据文件刚做过升级迁移，落盘固化
+        if self.vault.dirty:                # 迁移或首次初始化过，落盘固化
             self._save_vault()
 
     # ============================================================ 构建界面
@@ -395,9 +411,8 @@ class MainWindow(QWidget):
         self.nav_items["all"].set_count(stats["total"])
         self.nav_items["favorite"].set_count(stats["favorite"])
         self.nav_items["trash"].set_count(stats["trash"])
-        audit = strength.audit(self.vault.active_entries(),
-                               self.vault.settings.password_max_age_days)
-        issue_count = len(audit["weak"]) + len(audit["reused"]) + len(audit["aged"])
+        issue_count = len(strength.risk_entries(
+            self.vault.active_entries(), self.vault.settings.password_max_age_days))
         self.nav_items["audit"].set_count(issue_count)
 
         for key, item in self.nav_items.items():
@@ -459,11 +474,8 @@ class MainWindow(QWidget):
         elif self.filter_kind == "tag":
             entries = [e for e in entries if self.filter_value in e.tags]
         elif self.filter_kind == "audit":
-            report = strength.audit(entries, self.vault.settings.password_max_age_days)
-            flagged = {e.id for e in report["weak"] + report["aged"] + report["empty"]}
-            for group in report["reused"]:
-                flagged.update(e.id for e in group)
-            entries = [e for e in entries if e.id in flagged]
+            entries = strength.risk_entries(
+                entries, self.vault.settings.password_max_age_days)
 
         if self.search_text:
             entries = [e for e in entries if e.matches(self.search_text)]
@@ -488,8 +500,15 @@ class MainWindow(QWidget):
         else:
             self.list_empty.hide()
             self.list_scroll.show()
+            # 审计视图下把每条记录的具体问题直接标在卡片上
+            audit_pool = self.vault.active_entries()
+            max_age = self.vault.settings.password_max_age_days
+            show_issues = self.filter_kind == "audit"
             for entry in entries:
-                card = EntryCard(entry, selected=(entry.id == self.selected_id))
+                issues = (strength.entry_issues(entry, audit_pool, max_age)
+                          if show_issues else None)
+                card = EntryCard(entry, selected=(entry.id == self.selected_id),
+                                 issues=issues)
                 card.clicked.connect(self.select_entry)
                 card.activated.connect(self.edit_entry)
                 card.menu_requested.connect(self._show_entry_menu)
@@ -514,10 +533,21 @@ class MainWindow(QWidget):
         """重建详情面板。"""
         self._clear_layout(self.detail_layout)
         self._totp_state = None
+        # 换内容后回到顶部，否则会停在上一条记录的滚动位置
+        self.detail_scroll.verticalScrollBar().setValue(0)
 
         entry = self.vault.find(self.selected_id) if self.selected_id else None
-        if entry is None or entry.is_deleted and self.filter_kind != "trash":
+        if entry is not None and entry.is_deleted and self.filter_kind != "trash":
             entry = None
+
+        # 审计视图：没有选中记录时，右侧显示完整的风险报告——
+        # 这样"安全审计"和"全部记录"在界面上一眼就能区分开。
+        if self.filter_kind == "audit" and entry is None:
+            self.detail_empty.hide()
+            self.detail_scroll.show()
+            self._build_audit_view()
+            return
+
         if entry is None:
             self.detail_scroll.hide()
             self.detail_empty.show()
@@ -531,14 +561,16 @@ class MainWindow(QWidget):
         else:
             self._build_entry_detail(entry)
 
+    def _build_audit_view(self) -> None:
+        """在详情区嵌入安全审计报告。"""
+        panel = AuditPanel(self.detail_host, self.vault)
+        panel.entry_selected.connect(self._jump_to_entry)
+        self.detail_layout.addWidget(panel)
+        self.audit_panel = panel
+
     def _clear_layout(self, layout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-            elif item.layout() is not None:
-                self._clear_layout(item.layout())
+        """清空布局（先摘父控件再 deleteLater，避免重建时出现残影）。"""
+        widgets.clear_layout(layout)
 
     def _build_trash_detail(self, entry: Entry) -> None:
         """回收站条目的简化详情。"""
@@ -575,6 +607,15 @@ class MainWindow(QWidget):
 
     def _build_entry_detail(self, entry: Entry) -> None:
         """完整详情：标题区 + 字段卡片 + 元信息。"""
+        # 从审计报告点进来的，给一条回到报告的路径
+        if self.filter_kind == "audit":
+            back_row = QHBoxLayout()
+            back_button = text_button("‹  返回审计报告", kind="Link")
+            back_button.clicked.connect(self._back_to_audit)
+            back_row.addWidget(back_button)
+            back_row.addStretch(1)
+            self.detail_layout.addLayout(back_row)
+
         # 标题区
         header = QHBoxLayout()
         header.setSpacing(14)
@@ -622,6 +663,11 @@ class MainWindow(QWidget):
         actions.addWidget(more_button)
         header.addLayout(actions)
         self.detail_layout.addLayout(header)
+
+        # 风险提示：明确写出这条记录的问题出在哪
+        banner = self._build_risk_banner(entry)
+        if banner is not None:
+            self.detail_layout.addWidget(banner)
         self.detail_layout.addSpacing(4)
 
         # 字段卡片
@@ -690,6 +736,85 @@ class MainWindow(QWidget):
         self.detail_layout.addWidget(meta)
 
         self.detail_layout.addStretch(1)
+
+    def _build_risk_banner(self, entry: Entry) -> QWidget | None:
+        """详情页顶部的风险提示。
+
+        用户不需要自己去猜"哪里有风险"：这里直接列出问题类型和具体原因。
+        """
+        issues = strength.entry_issues(
+            entry, self.vault.active_entries(), self.vault.settings.password_max_age_days)
+        risks = [i for i in issues if i.is_risk]
+        suggests = [i for i in issues if not i.is_risk]
+        if not risks:
+            return None
+
+        level = "high" if any(i.severity == "high" for i in risks) else "medium"
+        card = QFrame()
+        card.setObjectName("RiskBanner")
+        card.setProperty("level", level)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(9)
+
+        head = QHBoxLayout()
+        head.setSpacing(9)
+        icon_label = QLabel()
+        icon_label.setPixmap(icons.colored_pixmap(
+            "alert", "danger" if level == "high" else "warning", 18))
+        head.addWidget(icon_label, 0, Qt.AlignTop)
+
+        title = QLabel(f"这条记录有 {len(risks)} 处需要关注")
+        title.setObjectName("RiskTitle")
+        title.setProperty("level", level)
+        head.addWidget(title)
+        head.addStretch(1)
+
+        fix_button = text_button("换个强密码", icon_name="sparkles", size=15)
+        fix_button.setToolTip("用密码生成器换一个新密码，并复制到剪贴板")
+        fix_button.clicked.connect(lambda: self._fix_password(entry))
+        head.addWidget(fix_button)
+        layout.addLayout(head)
+
+        for issue in risks + suggests[:1]:      # 最多再带一条建议，避免刷屏
+            layout.addLayout(self._build_issue_line(issue))
+        return card
+
+    def _build_issue_line(self, issue: strength.Issue) -> QHBoxLayout:
+        """一行问题：结论 + 具体原因。"""
+        line = QHBoxLayout()
+        line.setSpacing(8)
+
+        dot = QLabel("●")
+        dot.setObjectName("RiskDot")
+        dot.setProperty("level", issue.severity)
+        dot.setFixedWidth(12)
+        line.addWidget(dot, 0, Qt.AlignTop)
+
+        column = QVBoxLayout()
+        column.setSpacing(1)
+        title = QLabel(issue.title)
+        title.setObjectName("RiskText")
+        title.setWordWrap(True)
+        column.addWidget(title)
+        if issue.detail:
+            detail = QLabel(issue.detail)
+            detail.setObjectName("Faint")
+            detail.setWordWrap(True)
+            column.addWidget(detail)
+        line.addLayout(column, 1)
+        return line
+
+    def _fix_password(self, entry: Entry) -> None:
+        """用生成器给这条记录换一个新密码，并复制到剪贴板方便去网站改。"""
+        password = GeneratorDialog.get_password(self, max(len(entry.password), 18))
+        if not password:
+            return
+        self.vault.update_entry(entry.id, {}, new_password=password)
+        self._save_vault()
+        self.copy_text(password, "新密码", sensitive=True)
+        self.reload_all()
+        self.toast.show_message("已保存新密码；建议先到网站完成修改，旧密码可在编辑窗口的历史中找回")
 
     def _build_password_row(self, entry: Entry) -> QFrame:
         """密码行：默认掩码，可切换显示。"""
@@ -796,10 +921,11 @@ class MainWindow(QWidget):
         """切换筛选条件。"""
         self.filter_kind = kind
         self.filter_value = value
+        if kind == "audit":
+            self.selected_id = ""       # 进入审计视图先看总体报告
         self._refresh_sidebar()
         self.refresh_list()
-        if kind == "audit":
-            self.refresh_detail()
+        self.refresh_detail()
 
     def _on_search_changed(self, text: str) -> None:
         self.search_text = text.strip()
@@ -1093,17 +1219,19 @@ class MainWindow(QWidget):
             self.reload_all()
             self.toast.show_message("设置已更新")
 
-    def open_audit(self) -> None:
-        dialog = AuditDialog(self, self.vault)
-        dialog.entry_selected.connect(self._jump_to_entry)
-        dialog.exec()
-
     def _jump_to_entry(self, entry_id: str) -> None:
-        """从审计窗口跳转到某条记录。"""
-        self.set_filter("all")
+        """从审计报告跳到某条记录（停留在审计视图，方便看完再回到报告）。"""
         self.select_entry(entry_id)
-        if entry_id in self._cards:
-            self.list_scroll.ensureWidgetVisible(self._cards[entry_id])
+        card = self._cards.get(entry_id)
+        if card is not None:
+            self.list_scroll.ensureWidgetVisible(card)
+
+    def _back_to_audit(self) -> None:
+        """从某条记录回到审计报告。"""
+        self.selected_id = ""
+        for card in self._cards.values():
+            card.set_selected(False)
+        self.refresh_detail()
 
     # ------------------------------------------------------------ 主题与设置
 

@@ -33,6 +33,7 @@ from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
 from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
+from psvault.ui.audit_panel import AuditPanel  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
@@ -60,6 +61,8 @@ class UiFlowTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "flow.psvault"
         self.vault = Vault.create(self.path, "FlowTest#2024")
+        # 外部备份改到临时目录，避免测试污染真实的「文档」目录
+        self.vault.settings.backup_external_dir = str(Path(self.tmp.name) / "external")
         self.window = MainWindow(self.vault)
         self.window.resize(1180, 760)
         self.window.show()
@@ -337,6 +340,69 @@ class UiFlowTest(unittest.TestCase):
         self.assertNotIn("网络设备", reopened.categories)
         dialog.deleteLater()
         pump()
+
+    def test_15_audit_view_shows_report_not_detail(self) -> None:
+        """安全审计视图右侧是风险报告，而不是普通的记录详情。"""
+        self._create_via_dialog(title="弱密码站", password="123456")
+        self._create_via_dialog(title="好密码站", password="Xk7#mQ2!vL9$pR4@",
+                                totp_secret="JBSWY3DPEHPK3PXP")
+
+        self.window.set_filter("audit")
+        pump()
+
+        panels = self.window.detail_host.findChildren(AuditPanel)
+        self.assertEqual(len(panels), 1, "审计视图应嵌入审计报告面板")
+        self.assertEqual(len(self.window._cards), 1, "列表只应出现有问题的记录")
+        self.assertEqual(self.window.selected_id, "")
+
+        # 报告必须写清楚问题是什么，而不是只给一个分数
+        text = " ".join(label.text() for label in panels[0].findChildren(QLabel))
+        self.assertIn("弱密码", text)
+        self.assertTrue("密码过于简单" in text or "弱密码" in text)
+
+    def test_16_detail_banner_names_the_risk(self) -> None:
+        """详情页要明确指出风险类型和原因。"""
+        entry = self._create_via_dialog(title="甲站", password="repeat-pass-1234")
+        self._create_via_dialog(title="乙站", password="repeat-pass-1234")
+
+        self.window.set_filter("all")
+        self.window.select_entry(entry.id)
+        pump()
+
+        banner = self.window.detail_host.findChild(QFrame, "RiskBanner")
+        self.assertIsNotNone(banner, "有风险的记录应在详情页显示风险横幅")
+        text = " ".join(label.text() for label in banner.findChildren(QLabel))
+        self.assertIn("重复", text)
+        self.assertIn("乙站", text)
+
+    def test_17_healthy_entry_has_no_banner(self) -> None:
+        entry = self._create_via_dialog(title="很安全的站", password="Xk7#mQ2!vL9$pR4@",
+                                        totp_secret="JBSWY3DPEHPK3PXP")
+        self.window.select_entry(entry.id)
+        pump()
+        self.assertIsNone(self.window.detail_host.findChild(QFrame, "RiskBanner"))
+
+    def test_18_backup_written_when_saving(self) -> None:
+        """保存记录时自动留下备份（本地 + 外部各一份）。"""
+        self._create_via_dialog(title="备份测试", password="Backup#123456")
+        backups = self.vault.backup_manager().list()
+        self.assertTrue(backups)
+        self.assertEqual({info.location for info in backups}, {"本地", "外部"})
+
+    def test_19_restore_from_backup(self) -> None:
+        """从备份恢复能把数据换回指定版本。"""
+        self._create_via_dialog(title="第一版", password="First#123456")
+        self.vault.backup_manager().backup(force=True)
+        snapshot = self.vault.backup_manager().latest()
+        self.assertIsNotNone(snapshot)
+
+        self._create_via_dialog(title="第二版", password="Second#123456")
+        self.assertEqual(len(self.vault.active_entries()), 2)
+
+        self.vault.restore_backup(snapshot.path)
+        self.window.reload_all()
+        pump()
+        self.assertEqual([e.title for e in self.vault.active_entries()], ["第一版"])
 
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""

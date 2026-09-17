@@ -208,6 +208,12 @@ class Settings:
     history_limit: int = HISTORY_LIMIT   # 每条记录保留的密码历史条数
     password_max_age_days: int = 180     # 超过该天数未改密则列入审计提醒
 
+    # 备份策略
+    auto_backup: bool = True             # 每次保存前自动留一份历史版本
+    backup_keep: int = 10                # 每个备份目录保留的份数
+    backup_external_dir: str = ""        # 外部备份目录（空表示尚未确定）
+    backup_external_enabled: bool = True # 是否在程序目录之外再存一份
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "theme": self.theme,
@@ -216,6 +222,10 @@ class Settings:
             "lock_on_minimize": bool(self.lock_on_minimize),
             "history_limit": int(self.history_limit),
             "password_max_age_days": int(self.password_max_age_days),
+            "auto_backup": bool(self.auto_backup),
+            "backup_keep": int(self.backup_keep),
+            "backup_external_dir": self.backup_external_dir,
+            "backup_external_enabled": bool(self.backup_external_enabled),
         }
 
     @classmethod
@@ -234,5 +244,11 @@ class Settings:
             history_limit=int(data.get("history_limit", base.history_limit)),
             password_max_age_days=int(
                 data.get("password_max_age_days", base.password_max_age_days)
+            ),
+            auto_backup=bool(data.get("auto_backup", base.auto_backup)),
+            backup_keep=max(1, int(data.get("backup_keep", base.backup_keep))),
+            backup_external_dir=str(data.get("backup_external_dir", "")),
+            backup_external_enabled=bool(
+                data.get("backup_external_enabled", base.backup_external_enabled)
             ),
         )

@@ -101,6 +101,7 @@ def run_selftest(argv: list[str] | None = None) -> int:
 
             path = Path(tmp) / "selftest.psvault"
             vault = Vault.create(path, "自检密码#2024", name="自检保险箱")
+            vault.settings.backup_external_dir = str(Path(tmp) / "external")   # 不写到用户目录
             vault.add_entry(Entry(title="自检条目", username="tester",
                                   password="Self#Check2024", phone="13800000000"))
             vault.save()
@@ -135,6 +136,7 @@ def run_selftest(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="psvault-selftest-") as tmp:
             path = Path(tmp) / "ui.psvault"
             vault = Vault.create(path, "自检密码#2024", name="自检保险箱")
+            vault.settings.backup_external_dir = str(Path(tmp) / "external")
             vault.add_entry(Entry(title="界面自检", username="tester",
                                   password="Ui#Check2024", totp_secret="JBSWY3DPEHPK3PXP"))
             window = MainWindow(vault)

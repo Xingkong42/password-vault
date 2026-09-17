@@ -43,6 +43,23 @@ def elide(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def clear_layout(layout) -> None:
+    """清空布局中的全部控件与子布局。
+
+    先 setParent(None) 再 deleteLater：deleteLater 要等事件循环处理
+    DeferredDelete 才真正销毁，中间这段时间控件仍会显示，重建面板时会看到
+    新旧内容重叠的残影。摘掉父控件可以让它立刻从视觉上消失。
+    """
+    while layout.count():
+        item = layout.takeAt(0)
+        widget = item.widget()
+        if widget is not None:
+            widget.setParent(None)
+            widget.deleteLater()
+        elif item.layout() is not None:
+            clear_layout(item.layout())
+
+
 # ---------------------------------------------------------------- 基础按钮
 
 class IconButton(QToolButton):
