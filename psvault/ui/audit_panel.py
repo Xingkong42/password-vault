@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from ..core import strength
 from ..core.storage import Vault
 from . import icons, widgets
-from .widgets import Badge, RingGauge, text_button
+from .widgets import Badge, IconButton, RingGauge, text_button
 
 # 严重程度 -> 徽章样式
 SEVERITY_BADGE = {
@@ -33,7 +33,10 @@ SEVERITY_BADGE = {
 class AuditPanel(QWidget):
     """完整的安全审计报告。"""
 
-    entry_selected = Signal(str)     # 点击"查看"时跳转到该记录
+    entry_selected = Signal(str)            # 点击"查看"时跳转到该记录
+    issue_ignored = Signal(str, str)        # (记录 id, 问题类型) 忽略这类提示
+    issue_restored = Signal(str, str)       # 恢复某条被忽略的提示
+    all_restored = Signal()                 # 恢复全部忽略
 
     def __init__(self, parent: QWidget | None, vault: Vault) -> None:
         super().__init__(parent)
@@ -63,7 +66,10 @@ class AuditPanel(QWidget):
             if any(issue.is_risk for issue in issues):
                 entries_with_risk += 1
             for issue in issues:
+                if issue.ignored:
+                    continue        # 已忽略的单独放在报告末尾，不混进正式问题里
                 grouped.setdefault(issue.kind, []).append((entry, issue))
+        ignored_items = strength.ignored_issues(entries, max_age)
 
         risk_total = sum(
             len(grouped.get(key, []))
@@ -84,6 +90,10 @@ class AuditPanel(QWidget):
             if not items:
                 continue
             self._layout.addWidget(self._build_group(key, title, icon_name, hint, items))
+
+        ignored_card = self._build_ignored(ignored_items)
+        if ignored_card is not None:
+            self._layout.addWidget(ignored_card)
 
         self._layout.addWidget(self._build_footer(entries))
         self._layout.addStretch(1)
@@ -213,10 +223,65 @@ class AuditPanel(QWidget):
         column.addWidget(detail)
         layout.addLayout(column, 1)
 
+        ignore_button = IconButton("ignore", f"忽略「{issue.short_label}」提示", box=26, size=14)
+        ignore_button.clicked.connect(
+            lambda _=False, eid=entry.id, k=issue.kind: self.issue_ignored.emit(eid, k))
+        layout.addWidget(ignore_button, 0, Qt.AlignTop)
+
         view_button = text_button("查看", kind="Link")
         view_button.clicked.connect(lambda _=False, eid=entry.id: self.entry_selected.emit(eid))
         layout.addWidget(view_button, 0, Qt.AlignTop)
         return row
+
+    def _build_ignored(self, items: list[tuple[object, strength.Issue]]) -> QWidget | None:
+        """已忽略的提示：集中列出并可随时恢复，避免"点错了再也看不到"。"""
+        if not items:
+            return None
+
+        card = QFrame()
+        card.setObjectName("Card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        icon_label = QLabel()
+        icon_label.setPixmap(icons.colored_pixmap("ignore", "text_faint", 15))
+        header.addWidget(icon_label)
+        header.addWidget(widgets.section_title(f"已忽略的提示 · {len(items)}"))
+        header.addStretch(1)
+        restore_all = text_button("全部恢复", kind="Link")
+        restore_all.clicked.connect(lambda _=False: self.all_restored.emit())
+        header.addWidget(restore_all)
+        layout.addLayout(header)
+        layout.addWidget(widgets.hint_label(
+            "这些提示已被你忽略，不再计入安全评分。随时可以恢复。"))
+
+        for entry, issue in items[:20]:
+            line = QHBoxLayout()
+            line.setSpacing(10)
+            name = QLabel(widgets.elide(entry.title, 18))
+            name.setObjectName("FieldValue")
+            line.addWidget(name)
+            account = entry.username or entry.domain()
+            if account:
+                account_label = QLabel(widgets.elide(account, 16))
+                account_label.setObjectName("Faint")
+                line.addWidget(account_label)
+            line.addStretch(1)
+            tag = QLabel(issue.title)
+            tag.setObjectName("Faint")
+            line.addWidget(tag)
+            restore = text_button("恢复", kind="Link")
+            restore.clicked.connect(
+                lambda _=False, eid=entry.id, k=issue.kind: self.issue_restored.emit(eid, k))
+            line.addWidget(restore)
+            layout.addLayout(line)
+
+        if len(items) > 20:
+            layout.addWidget(widgets.hint_label(f"…… 其余 {len(items) - 20} 条未列出"))
+        return card
 
     def _build_footer(self, entries: list) -> QWidget:
         card = QFrame()
@@ -228,6 +293,7 @@ class AuditPanel(QWidget):
         for text in (
             "点任意一行的「查看」可以直接跳到该记录，在详情页用生成器换一个新密码。",
             "重复使用的密码建议优先处理：换掉其中一个，两个账号就都安全了。",
+            "确实不想处理的提示，点行尾的 ⊘ 忽略；随时可以在下方「已忽略的提示」里恢复。",
             "长期未更换的提醒天数可以在「设置 → 安全」里调整。",
         ):
             line = QHBoxLayout()

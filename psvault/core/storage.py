@@ -390,6 +390,45 @@ class Vault:
         self.dirty = self.dirty or count > 0
         return count
 
+    def ignore_issue(self, entry_id: str, kind: str) -> bool:
+        """忽略某条记录的某类问题（不再出现在安全审计里）。"""
+        entry = self.find(entry_id)
+        if entry is None or not entry.ignore_issue(kind):
+            return False
+        self.dirty = True
+        return True
+
+    def unignore_issue(self, entry_id: str, kind: str) -> bool:
+        """恢复某条记录被忽略的某类问题。"""
+        entry = self.find(entry_id)
+        if entry is None or not entry.unignore_issue(kind):
+            return False
+        self.dirty = True
+        return True
+
+    def unignore_all(self) -> int:
+        """恢复全部忽略项，返回恢复的条数。"""
+        count = 0
+        for entry in self.entries:
+            count += len(entry.ignored_issues)
+            entry.ignored_issues = []
+        if count:
+            self.dirty = True
+        return count
+
+    def ignored_summary(self) -> list[tuple[str, str, str]]:
+        """汇总被忽略的问题：(记录标题, 记录 id, 问题类型)。"""
+        from .strength import entry_issues
+
+        entries = self.active_entries()
+        result: list[tuple[str, str, str]] = []
+        for entry in entries:
+            for issue in entry_issues(entry, entries,
+                                      self.settings.password_max_age_days):
+                if issue.ignored and issue.severity_risk:
+                    result.append((entry.title, entry.id, issue.kind))
+        return result
+
     def toggle_favorite(self, entry_id: str) -> bool:
         """切换收藏状态。"""
         entry = self.find(entry_id)

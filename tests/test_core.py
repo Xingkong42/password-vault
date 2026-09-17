@@ -201,7 +201,7 @@ class StrengthTest(unittest.TestCase):
         ]
         result = strength.audit(entries)
         self.assertTrue(any(e.title == "A" for e in result["weak"]))
-        self.assertEqual(len(result["reused"]), 1)
+        self.assertEqual({e.title for e in result["reused"]}, {"B", "C"})
         self.assertEqual(len(result["empty"]), 1)
 
 
@@ -560,6 +560,102 @@ class BackupTest(unittest.TestCase):
 
         target = default_external_dir()
         self.assertIn("密码保险箱备份", str(target))
+
+
+class IgnoreIssueTest(unittest.TestCase):
+    """忽略风险提示：精确到问题类型，且随时可以恢复。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "v.psvault"
+        self.vault = Vault.create(self.path, "Master#2024")
+        self.vault.settings.backup_external_dir = str(Path(self.tmp.name) / "ext")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _risk_ids(self) -> set[str]:
+        return {e.id for e in strength.risk_entries(self.vault.active_entries())}
+
+    def test_ignore_removes_from_risk_list(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.assertIn(entry.id, self._risk_ids())
+        self.assertTrue(self.vault.ignore_issue(entry.id, "weak"))
+        self.assertNotIn(entry.id, self._risk_ids())
+
+    def test_ignored_issue_is_flagged_but_severity_kept(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.vault.ignore_issue(entry.id, "weak")
+        issues = strength.entry_issues(entry, self.vault.active_entries())
+        weak = next(i for i in issues if i.kind == "weak")
+        self.assertTrue(weak.ignored)
+        self.assertFalse(weak.is_risk)          # 不再计入风险
+        self.assertTrue(weak.severity_risk)     # 但严重程度本身没被改写
+
+    def test_ignore_is_per_kind(self) -> None:
+        """忽略"弱密码"不该顺手把"重复使用"也屏蔽掉。"""
+        first = self.vault.add_entry(Entry(title="甲", password="123456"))
+        self.vault.add_entry(Entry(title="乙", password="123456"))
+        self.vault.ignore_issue(first.id, "weak")
+
+        issues = strength.entry_issues(first, self.vault.active_entries())
+        weak = next(i for i in issues if i.kind == "weak")
+        reused = next(i for i in issues if i.kind == "reused")
+        self.assertTrue(weak.ignored)
+        self.assertFalse(reused.ignored)
+        self.assertIn(first.id, self._risk_ids())
+
+    def test_restore_brings_it_back(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.vault.ignore_issue(entry.id, "weak")
+        self.assertTrue(self.vault.unignore_issue(entry.id, "weak"))
+        self.assertFalse(self.vault.unignore_issue(entry.id, "weak"))   # 重复恢复
+        self.assertIn(entry.id, self._risk_ids())
+
+    def test_ignore_survives_save_and_reopen(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.vault.ignore_issue(entry.id, "weak")
+        self.vault.save()
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual(reopened.find(entry.id).ignored_issues, ["weak"])
+        self.assertNotIn(entry.id, {e.id for e in strength.risk_entries(
+            reopened.active_entries())})
+
+    def test_unignore_all(self) -> None:
+        first = self.vault.add_entry(Entry(title="甲", password="123456"))
+        second = self.vault.add_entry(Entry(title="乙", password=""))
+        self.vault.ignore_issue(first.id, "weak")
+        self.vault.ignore_issue(second.id, "empty")
+        self.assertEqual(self.vault.unignore_all(), 2)
+        self.assertEqual(self.vault.unignore_all(), 0)
+
+    def test_ignored_list_feeds_restore_ui(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.vault.ignore_issue(entry.id, "weak")
+        items = strength.ignored_issues(self.vault.active_entries())
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0][0].id, entry.id)
+        self.assertEqual(items[0][1].kind, "weak")
+
+    def test_audit_excludes_ignored(self) -> None:
+        entry = self.vault.add_entry(Entry(title="弱", password="123456"))
+        self.assertTrue(strength.audit(self.vault.active_entries())["weak"])
+        self.vault.ignore_issue(entry.id, "weak")
+        self.assertEqual(strength.audit(self.vault.active_entries())["weak"], [])
+
+    def test_ignoring_one_of_two_duplicates_keeps_the_other_flagged(self) -> None:
+        """只忽略其中一条的重复提示，另一条仍应被提醒。"""
+        first = self.vault.add_entry(Entry(title="甲", password="same-pass-1234"))
+        second = self.vault.add_entry(Entry(title="乙", password="same-pass-1234"))
+        self.vault.ignore_issue(first.id, "reused")
+        ids = self._risk_ids()
+        self.assertNotIn(first.id, ids)
+        self.assertIn(second.id, ids)
+
+    def test_legacy_entry_without_ignore_field(self) -> None:
+        entry = Entry.from_dict({"title": "旧记录", "password": "p"})
+        self.assertEqual(entry.ignored_issues, [])
+        self.assertFalse(entry.is_issue_ignored("weak"))
 
 
 class BackupManagerUnitTest(unittest.TestCase):

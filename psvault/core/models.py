@@ -70,6 +70,8 @@ class Entry:
     updated_at: str = field(default_factory=now_iso)
     deleted_at: str = ""
     history: list[HistoryItem] = field(default_factory=list)
+    # 用户在安全审计里主动忽略的问题类型（weak / reused / aged / empty / suggest）
+    ignored_issues: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------ 行为方法
 
@@ -77,6 +79,24 @@ class Entry:
     def is_deleted(self) -> bool:
         """是否位于回收站。"""
         return bool(self.deleted_at)
+
+    def is_issue_ignored(self, kind: str) -> bool:
+        """该类问题是否已被忽略。"""
+        return kind in self.ignored_issues
+
+    def ignore_issue(self, kind: str) -> bool:
+        """忽略某类问题，已忽略时返回 False。"""
+        if not kind or kind in self.ignored_issues:
+            return False
+        self.ignored_issues.append(kind)
+        return True
+
+    def unignore_issue(self, kind: str) -> bool:
+        """取消忽略，原本就没忽略时返回 False。"""
+        if kind not in self.ignored_issues:
+            return False
+        self.ignored_issues.remove(kind)
+        return True
 
     def touch(self) -> None:
         """刷新修改时间。"""
@@ -165,6 +185,7 @@ class Entry:
             "updated_at": self.updated_at,
             "deleted_at": self.deleted_at,
             "history": [item.to_dict() for item in self.history],
+            "ignored_issues": list(self.ignored_issues),
         }
 
     @classmethod
@@ -194,6 +215,10 @@ class Entry:
         entry.history = [
             HistoryItem.from_dict(item) for item in raw_history if isinstance(item, dict)
         ]
+        raw_ignored = data.get("ignored_issues") or []
+        if isinstance(raw_ignored, str):
+            raw_ignored = [raw_ignored]
+        entry.ignored_issues = [str(k) for k in raw_ignored if str(k).strip()]
         return entry
 
 

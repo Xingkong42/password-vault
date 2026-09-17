@@ -152,23 +152,18 @@ def evaluate(password: str) -> StrengthReport:
 
 
 def audit(entries: list, max_age_days: int = 180) -> dict[str, list]:
-    """对条目列表做安全审计，返回弱密码、重复密码、过期密码三组结果。
+    """按问题类型分组，便于整体查看。
 
-    参数 entries 为 models.Entry 列表（仅传入未删除的条目）。
+    与 `entry_issues` 共用同一套判定逻辑（包括"已忽略"的处理），
+    保证界面各处口径一致。返回的每个列表里是同一条记录可能出现一次。
     """
-    weak = [e for e in entries if e.password and evaluate(e.password).score <= 1]
-
-    buckets: dict[str, list] = {}
+    grouped: dict[str, list] = {"weak": [], "reused": [], "aged": [], "empty": []}
     for entry in entries:
-        if entry.password:
-            buckets.setdefault(entry.password, []).append(entry)
-    reused = [group for group in buckets.values() if len(group) > 1]
-
-    aged = [e for e in entries if e.password and max_age_days > 0
-            and e.age_days() >= max_age_days]
-    empty = [e for e in entries if not e.password]
-
-    return {"weak": weak, "reused": reused, "aged": aged, "empty": empty}
+        for issue in entry_issues(entry, entries, max_age_days):
+            if issue.ignored or issue.kind not in grouped:
+                continue
+            grouped[issue.kind].append(entry)
+    return grouped
 
 
 # ---------------------------------------------------------------- 单条记录体检
@@ -210,11 +205,17 @@ class Issue:
     severity: str      # high / medium / low / info
     title: str         # 一句话结论，如「密码强度较弱」
     detail: str = ""   # 具体原因，如「长度不足 8 位；包含键盘连续序列」
+    ignored: bool = False   # 用户已在审计里主动忽略这类问题
+
+    @property
+    def severity_risk(self) -> bool:
+        """按严重程度判断是否算风险（不考虑是否已忽略）。"""
+        return self.severity != "info"
 
     @property
     def is_risk(self) -> bool:
-        """是否需要优先处理（info 级别的只是建议）。"""
-        return self.severity != "info"
+        """当前是否仍需要处理：既是风险，又没有被人为忽略。"""
+        return self.severity_risk and not self.ignored
 
     @property
     def severity_label(self) -> str:
@@ -229,7 +230,18 @@ def entry_issues(entry, entries: list, max_age_days: int = 180) -> list[Issue]:
     """检查单条记录，返回它存在的全部问题（按严重程度排序）。
 
     这是审计视图、详情页风险提示共用的判定逻辑，保证两处口径一致。
+    返回的每一项都带好 `ignored` 标记（用户是否忽略过这类问题）。
     """
+    issues = _collect_issues(entry, entries, max_age_days)
+    for issue in issues:
+        issue.ignored = entry.is_issue_ignored(issue.kind)
+    # 被忽略的排到后面，未处理的优先展示
+    issues.sort(key=lambda item: (item.ignored, SEVERITY_ORDER.get(item.severity, 9)))
+    return issues
+
+
+def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
+    """收集一条记录身上的全部问题（不含忽略标记）。"""
     issues: list[Issue] = []
 
     if not entry.password:
@@ -283,10 +295,19 @@ def entry_issues(entry, entries: list, max_age_days: int = 180) -> list[Issue]:
             detail="支持两步验证的网站建议开启，密钥可保存在本记录中",
         ))
 
-    issues.sort(key=lambda item: SEVERITY_ORDER.get(item.severity, 9))
     return issues
 
 
 def risk_entries(entries: list, max_age_days: int = 180) -> list:
-    """筛出存在风险（不含纯建议）的记录，供审计视图使用。"""
+    """筛出仍存在风险的记录（不含纯建议，也不含已全部忽略的）。"""
     return [e for e in entries if any(i.is_risk for i in entry_issues(e, entries, max_age_days))]
+
+
+def ignored_issues(entries: list, max_age_days: int = 180) -> list[tuple[object, Issue]]:
+    """列出被忽略、但问题当前依然存在的问题，供"恢复忽略"使用。"""
+    result: list[tuple[object, Issue]] = []
+    for entry in entries:
+        for issue in entry_issues(entry, entries, max_age_days):
+            if issue.ignored and issue.severity_risk:
+                result.append((entry, issue))
+    return result

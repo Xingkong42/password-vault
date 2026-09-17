@@ -565,6 +565,9 @@ class MainWindow(QWidget):
         """在详情区嵌入安全审计报告。"""
         panel = AuditPanel(self.detail_host, self.vault)
         panel.entry_selected.connect(self._jump_to_entry)
+        panel.issue_ignored.connect(self._ignore_issue)
+        panel.issue_restored.connect(self._restore_issue)
+        panel.all_restored.connect(self._restore_all_issues)
         self.detail_layout.addWidget(panel)
         self.audit_panel = panel
 
@@ -774,6 +777,11 @@ class MainWindow(QWidget):
         fix_button.setToolTip("用密码生成器换一个新密码，并复制到剪贴板")
         fix_button.clicked.connect(lambda: self._fix_password(entry))
         head.addWidget(fix_button)
+
+        ignore_button = text_button("忽略", icon_name="ignore", size=15)
+        ignore_button.setToolTip("不再提示这条记录的风险（可在安全审计中恢复）")
+        ignore_button.clicked.connect(lambda: self._ignore_all_for_entry(entry))
+        head.addWidget(ignore_button)
         layout.addLayout(head)
 
         for issue in risks + suggests[:1]:      # 最多再带一条建议，避免刷屏
@@ -1232,6 +1240,57 @@ class MainWindow(QWidget):
         for card in self._cards.values():
             card.set_selected(False)
         self.refresh_detail()
+
+    # ------------------------------------------------------------ 忽略风险提示
+
+    def _ignore_issue(self, entry_id: str, kind: str) -> None:
+        """忽略某条记录的某类风险提示（精确到问题类型）。"""
+        if not self.vault.ignore_issue(entry_id, kind):
+            return
+        self._save_vault()
+        self.reload_all()
+        self.toast.show_message("已忽略该提示，可在审计报告底部随时恢复")
+
+    def _restore_issue(self, entry_id: str, kind: str) -> None:
+        """恢复某条被忽略的提示。"""
+        if not self.vault.unignore_issue(entry_id, kind):
+            return
+        self._save_vault()
+        self.reload_all()
+        self.toast.show_message("已恢复该提示")
+
+    def _restore_all_issues(self) -> None:
+        """恢复全部被忽略的提示。"""
+        count = self.vault.unignore_all()
+        if not count:
+            return
+        self._save_vault()
+        self.reload_all()
+        self.toast.show_message(f"已恢复 {count} 项被忽略的提示")
+
+    def _ignore_all_for_entry(self, entry: Entry) -> None:
+        """一键忽略这条记录当前的全部风险提示。"""
+        issues = strength.entry_issues(
+            entry, self.vault.active_entries(), self.vault.settings.password_max_age_days)
+        risks = [i for i in issues if i.is_risk]
+        if not risks:
+            self.toast.show_message("这条记录目前没有需要忽略的提示")
+            return
+
+        answer = QMessageBox.question(
+            self, "忽略风险提示",
+            "不再对「%s」提示以下 %d 项？\n\n%s\n\n"
+            "可以随时在「安全审计」底部的已忽略列表里恢复。" % (
+                entry.title, len(risks), "\n".join(f"· {i.title}" for i in risks)),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+
+        for issue in risks:
+            self.vault.ignore_issue(entry.id, issue.kind)
+        self._save_vault()
+        self.reload_all()
+        self.toast.show_message("已忽略这条记录的风险提示")
 
     # ------------------------------------------------------------ 主题与设置
 

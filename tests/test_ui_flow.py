@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel  # noqa: E402
 
-from psvault.core import crypto  # noqa: E402
+from psvault.core import crypto, strength  # noqa: E402
 from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
@@ -403,6 +403,64 @@ class UiFlowTest(unittest.TestCase):
         self.window.reload_all()
         pump()
         self.assertEqual([e.title for e in self.vault.active_entries()], ["第一版"])
+
+    def test_20_ignore_issue_from_audit_report(self) -> None:
+        """在审计报告里忽略某类提示后，它不再出现，并且可以恢复。"""
+        entry = self._create_via_dialog(title="弱密码站", password="123456")
+        self.window.set_filter("audit")
+        pump()
+        self.assertEqual(len(self.window._cards), 1)
+
+        # 与点击报告里那个 ⊘ 按钮等价的链路：面板信号 → 主窗口处理
+        self.window.audit_panel.issue_ignored.emit(entry.id, "weak")
+        pump()
+        self.assertEqual(self.window._cards, {}, "忽略后该记录不应再出现在审计列表")
+        self.assertEqual(self.vault.find(entry.id).ignored_issues, ["weak"])
+
+        # 报告里能列出被忽略项，并可恢复
+        ignored = strength.ignored_issues(self.vault.active_entries())
+        self.assertEqual(len(ignored), 1)
+        self.window.audit_panel.issue_restored.emit(entry.id, "weak")
+        pump()
+        self.assertEqual(len(self.window._cards), 1, "恢复后应重新出现在审计列表")
+
+    def test_21_ignore_one_kind_keeps_others(self) -> None:
+        """忽略"弱密码"不能顺手把"重复使用"也屏蔽掉。"""
+        first = self._create_via_dialog(title="甲站", password="123456")
+        self._create_via_dialog(title="乙站", password="123456")
+        self.window.set_filter("audit")
+        pump()
+
+        self.window.audit_panel.issue_ignored.emit(first.id, "weak")
+        pump()
+        issues = strength.entry_issues(first, self.vault.active_entries(),
+                                       self.vault.settings.password_max_age_days)
+        reused = next(i for i in issues if i.kind == "reused")
+        self.assertTrue(reused.is_risk, "重复使用的提示应仍然生效")
+
+    def test_22_ignored_issue_is_persisted(self) -> None:
+        """忽略状态要落盘，重新打开保险箱后依然有效。"""
+        entry = self._create_via_dialog(title="弱密码站", password="123456")
+        self.window._ignore_issue(entry.id, "weak")
+        pump()
+        reopened = Vault.open(self.path, "FlowTest#2024")
+        self.assertEqual(reopened.find(entry.id).ignored_issues, ["weak"])
+
+    def test_23_restore_all_issues(self) -> None:
+        first = self._create_via_dialog(title="甲站", password="123456")
+        second = self._create_via_dialog(title="乙站", password="")
+        self.window.set_filter("audit")
+        pump()
+        self.window.audit_panel.issue_ignored.emit(first.id, "weak")
+        pump()
+        self.window.audit_panel.issue_ignored.emit(second.id, "empty")
+        pump()
+        self.assertEqual(self.window._cards, {})
+
+        self.window.audit_panel.all_restored.emit()
+        pump()
+        self.assertEqual(len(self.window._cards), 2)
+        self.assertEqual(self.vault.unignore_all(), 0)
 
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""

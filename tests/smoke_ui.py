@@ -74,6 +74,10 @@ def build_vault() -> Vault:
     vault.settings.backup_external_dir = str(tmp / "external-backup")
     for entry in SAMPLE:
         vault.add_entry(entry)
+    # 造一条"已忽略"记录，好让审计报告展示已忽略区块
+    for entry in vault.entries:
+        if entry.title == "淘宝":
+            vault.ignore_issue(entry.id, "reused")
     vault.save()
     return vault
 
@@ -135,6 +139,12 @@ def main() -> int:
         # 安全审计视图：右侧是完整的风险报告，而不是记录详情
         window.set_filter("audit")
         shot(window, f"audit-{mode}", app)
+
+        # 滚到底部，看"已忽略的提示"区块
+        bar = window.detail_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        shot(window, f"audit-bottom-{mode}", app)
+        bar.setValue(0)
 
         # 审计视图下点进某条记录：详情页顶部出现具体风险说明
         risky = [e for e in vault.active_entries() if not e.password or e.password == "taobao888"]

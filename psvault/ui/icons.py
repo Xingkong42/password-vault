@@ -83,6 +83,7 @@ ICONS: dict[str, tuple[str, bool]] = {
     "more": ('<circle cx="5.2" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="18.8" cy="12" r="1.5"/>', True),
     "info": ('<circle cx="12" cy="12" r="8.8"/><path d="M12 11.2v5"/>'
              '<circle cx="12" cy="8" r=".95" fill="{color}" stroke="none"/>', False),
+    "ignore": ('<circle cx="12" cy="12" r="8.6"/><path d="m6.2 6.2 11.6 11.6"/>', False),
     "copy-all": ('<rect x="3.5" y="3.5" width="12" height="12" rx="2.4"/>'
                  '<path d="M8.5 20.5h9A2.5 2.5 0 0 0 20 18V9"/>', False),
     "link": ('<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 1 0-5.7-5.7l-1 1"/>'
