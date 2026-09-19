@@ -274,11 +274,21 @@ class SettingsDialog(QDialog):
             self._password_msg(str(exc), danger=True)
             return
 
-        self.vault.change_master_password(new)
+        self._apply_backup_settings()          # 让"是否清理旧备份"的选择立即生效
+        try:
+            removed = self.vault.change_master_password(new)
+        except (OSError, crypto.VaultError) as exc:
+            self._password_msg(f"修改失败：{exc}", danger=True)
+            return
+
         self.current_password.clear()
         self.new_password.clear()
         self.confirm_password.clear()
-        self._password_msg("✓  主密码已更新，下次解锁请使用新密码", danger=False)
+        message = "✓  主密码已更新（下次解锁请用新密码），并已生成一份新密码的备份"
+        if removed:
+            message += f"；清理了 {removed} 份旧密码的备份"
+        self._password_msg(message, danger=False)
+        self._refresh_backup_list()
 
     def _password_msg(self, text: str, *, danger: bool) -> None:
         self.password_message.setText(text)
@@ -352,6 +362,12 @@ class SettingsDialog(QDialog):
         self.external_check.setChecked(self.vault.settings.backup_external_enabled)
         self.external_check.stateChanged.connect(self._on_external_toggled)
         card_layout.addWidget(self.external_check)
+
+        self.rekey_purge_check = QCheckBox("改主密码后清理旧密码的备份")
+        self.rekey_purge_check.setChecked(self.vault.settings.rekey_purges_old_backups)
+        self.rekey_purge_check.setToolTip(
+            "改密后旧备份需要旧主密码才能打开，留着也恢复不了")
+        card_layout.addWidget(self.rekey_purge_check)
 
         self.external_label = QLabel(self._external_dir_text())
         self.external_label.setObjectName("Faint")
@@ -452,6 +468,7 @@ class SettingsDialog(QDialog):
         settings.auto_backup = self.backup_check.isChecked()
         settings.backup_keep = self.backup_keep_spin.value()
         settings.backup_external_enabled = self.external_check.isChecked()
+        settings.rekey_purges_old_backups = self.rekey_purge_check.isChecked()
 
     def _backup_now(self) -> None:
         self._apply_backup_settings()

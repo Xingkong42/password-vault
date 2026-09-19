@@ -26,14 +26,16 @@ for stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel  # noqa: E402
 
 from psvault.core import crypto, strength  # noqa: E402
 from psvault.core.models import Entry  # noqa: E402
 from psvault.core.storage import Vault  # noqa: E402
 from psvault.ui import icons  # noqa: E402
-from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.audit_panel import AuditPanel  # noqa: E402
+from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
@@ -461,6 +463,91 @@ class UiFlowTest(unittest.TestCase):
         pump()
         self.assertEqual(len(self.window._cards), 2)
         self.assertEqual(self.vault.unignore_all(), 0)
+
+    def test_24_keyboard_navigation(self) -> None:
+        """↑/↓ 在列表中切换记录，边界不越界。"""
+        self._create_via_dialog(title="甲", password="Aaa#123456")
+        self._create_via_dialog(title="乙", password="Bbb#123456")
+        self.window.set_filter("all")
+        pump()
+
+        order = list(self.window._cards)
+        self.assertEqual(len(order), 2)
+
+        self.window._focus_first_card()          # 等价于在搜索框按 ↓
+        pump()
+        self.assertEqual(self.window.selected_id, order[0])
+
+        self.window._navigate_card(order[0], 1)  # ↓
+        pump()
+        self.assertEqual(self.window.selected_id, order[1])
+
+        self.window._navigate_card(order[1], 1)  # 到底了，停在最后一条
+        pump()
+        self.assertEqual(self.window.selected_id, order[1])
+
+        self.window._navigate_card(order[1], -1)  # ↑
+        pump()
+        self.assertEqual(self.window.selected_id, order[0])
+
+        self.window._navigate_card(order[0], -1)  # 到顶了，停在第一条
+        pump()
+        self.assertEqual(self.window.selected_id, order[0])
+
+    def test_25_search_box_down_enters_list(self) -> None:
+        """搜索框按 ↓ 把焦点交给列表。"""
+        self._create_via_dialog(title="甲", password="Aaa#123456")
+        self.window.set_filter("all")
+        pump()
+        self.window.search_box.setFocus()
+        QTest.keyClick(self.window.search_box, Qt.Key_Down)
+        pump()
+        self.assertIn(self.window.selected_id, self.window._cards)
+        self.assertTrue(self.window._cards[self.window.selected_id].hasFocus())
+
+    def test_26_ctrl_c_copies_password_from_list(self) -> None:
+        entry = self._create_via_dialog(title="复制测试", password="Copy#Me12345")
+        APP.clipboard().clear()
+        self.window._copy_password_of(entry.id)
+        self.assertEqual(APP.clipboard().text(), "Copy#Me12345")
+
+    def test_27_sort_options(self) -> None:
+        """排序切换生效，并把选择写回设置。"""
+        older = self._create_via_dialog(title="B站", password="Bbb#123456")
+        newer = self._create_via_dialog(title="A站", password="Aaa#123456")
+        pump()
+        older.created_at = "2026-01-01T00:00:00+08:00"
+        newer.created_at = "2026-06-01T00:00:00+08:00"
+
+        self.window.set_sort("title")
+        pump()
+        self.assertEqual([self.vault.find(i).title for i in self.window._cards],
+                         ["A站", "B站"])
+
+        self.window.set_sort("created")
+        pump()
+        self.assertEqual([self.vault.find(i).title for i in self.window._cards],
+                         ["A站", "B站"], "最近创建的应排在前面")
+
+        newer.created_at = "2025-01-01T00:00:00+08:00"   # 反转先后再验一次
+        self.window.refresh_list()
+        pump()
+        self.assertEqual([self.vault.find(i).title for i in self.window._cards],
+                         ["B站", "A站"])
+
+        reopened = Vault.open(self.path, "FlowTest#2024")
+        self.assertEqual(reopened.settings.sort_key, "created")
+
+    def test_29_sort_by_updated(self) -> None:
+        older = self._create_via_dialog(title="旧", password="Aaa#123456")
+        newer = self._create_via_dialog(title="新", password="Bbb#123456")
+        pump()
+        older.updated_at = "2026-01-01T00:00:00+08:00"
+        newer.updated_at = "2026-06-01T00:00:00+08:00"
+        self.window.set_sort("updated")
+        pump()
+        self.assertEqual([self.vault.find(i).title for i in self.window._cards],
+                         ["新", "旧"])
 
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""

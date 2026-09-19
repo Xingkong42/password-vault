@@ -9,7 +9,7 @@ import colorsys
 import hashlib
 from typing import Callable
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -232,6 +232,8 @@ class SecretLineEdit(QLineEdit):
 class SearchBox(QLineEdit):
     """左侧带放大镜图标的搜索框。"""
 
+    enter_list = Signal()      # 按下 ↓：焦点交给下方记录列表
+
     def __init__(self, placeholder: str = "搜索…", parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Search")
@@ -239,6 +241,12 @@ class SearchBox(QLineEdit):
         self.setClearButtonEnabled(True)
         self.setTextMargins(24, 0, 0, 0)
         self._action = self.addAction(icons.icon("search", "text_faint", 16), QLineEdit.LeadingPosition)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        if event.key() == Qt.Key_Down:
+            self.enter_list.emit()
+            return
+        super().keyPressEvent(event)
 
 
 # ---------------------------------------------------------------- 强度条

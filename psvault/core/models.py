@@ -16,6 +16,14 @@ DEFAULT_CATEGORY = "未分类"
 # 密码历史保留条数上限
 HISTORY_LIMIT = 10
 
+# 记录列表可选的排序方式
+SORT_KEYS = ("title", "updated", "created")
+SORT_LABELS = {
+    "title": "名称（收藏优先）",
+    "updated": "最近修改",
+    "created": "最近创建",
+}
+
 
 def now_iso() -> str:
     """当前本地时间的 ISO 字符串（精确到秒，带时区偏移）。"""
@@ -68,6 +76,7 @@ class Entry:
     totp_secret: str = ""
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
+    password_changed_at: str = field(default_factory=now_iso)   # 上次更换密码的时间
     deleted_at: str = ""
     history: list[HistoryItem] = field(default_factory=list)
     # 用户在安全审计里主动忽略的问题类型（weak / reused / aged / empty / suggest）
@@ -110,6 +119,7 @@ class Entry:
             self.history.insert(0, HistoryItem(password=self.password, changed_at=now_iso()))
             del self.history[HISTORY_LIMIT:]
         self.password = new_password
+        self.password_changed_at = now_iso()     # 密码年龄从这一刻重新算
         self.touch()
 
     def subtitle(self) -> str:
@@ -158,8 +168,21 @@ class Entry:
         return all(token in blob for token in keyword.lower().split())
 
     def age_days(self) -> int:
-        """距离上次修改的天数，用于密码老化审计。"""
+        """距离上次修改记录的天数（任何字段的修改都算）。"""
         moment = parse_iso(self.updated_at)
+        if moment is None:
+            return 0
+        delta = datetime.now().astimezone() - moment
+        return max(delta.days, 0)
+
+    def password_age_days(self) -> int:
+        """距离上次**更换密码**的天数。
+
+        必须和 updated_at 区分开：改个备注、加个标签也会刷新 updated_at，
+        若拿它当密码年龄，"长期未更换密码"就永远触发不了。
+        老数据没有 password_changed_at 字段，退回 updated_at 以免全部误报。
+        """
+        moment = parse_iso(self.password_changed_at) or parse_iso(self.updated_at)
         if moment is None:
             return 0
         delta = datetime.now().astimezone() - moment
@@ -183,6 +206,7 @@ class Entry:
             "totp_secret": self.totp_secret,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "password_changed_at": self.password_changed_at,
             "deleted_at": self.deleted_at,
             "history": [item.to_dict() for item in self.history],
             "ignored_issues": list(self.ignored_issues),
@@ -210,6 +234,9 @@ class Entry:
             totp_secret=str(data.get("totp_secret", "")),
             created_at=str(data.get("created_at") or now_iso()),
             updated_at=str(data.get("updated_at") or now_iso()),
+            # 老数据没有这个字段：用 updated_at 兜底，避免升级后所有记录突然"过期"
+            password_changed_at=str(
+                data.get("password_changed_at") or data.get("updated_at") or now_iso()),
             deleted_at=str(data.get("deleted_at", "")),
         )
         entry.history = [
@@ -238,6 +265,10 @@ class Settings:
     backup_keep: int = 10                # 每个备份目录保留的份数
     backup_external_dir: str = ""        # 外部备份目录（空表示尚未确定）
     backup_external_enabled: bool = True # 是否在程序目录之外再存一份
+    rekey_purges_old_backups: bool = True  # 改主密码后清理旧密码的备份
+
+    # 记录列表的排序方式：title / updated / created
+    sort_key: str = "title"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -251,6 +282,8 @@ class Settings:
             "backup_keep": int(self.backup_keep),
             "backup_external_dir": self.backup_external_dir,
             "backup_external_enabled": bool(self.backup_external_enabled),
+            "rekey_purges_old_backups": bool(self.rekey_purges_old_backups),
+            "sort_key": self.sort_key,
         }
 
     @classmethod
@@ -276,4 +309,10 @@ class Settings:
             backup_external_enabled=bool(
                 data.get("backup_external_enabled", base.backup_external_enabled)
             ),
+            rekey_purges_old_backups=bool(
+                data.get("rekey_purges_old_backups", base.rekey_purges_old_backups)
+            ),
+            sort_key=(str(data.get("sort_key", base.sort_key))
+                      if str(data.get("sort_key", base.sort_key)) in SORT_KEYS
+                      else base.sort_key),
         )

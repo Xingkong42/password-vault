@@ -22,9 +22,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import crypto, strength, totp
-from ..core.models import DEFAULT_CATEGORY, Entry
+from ..core.models import DEFAULT_CATEGORY, SORT_KEYS, SORT_LABELS, Entry
 from ..core.storage import Vault
 from . import icons, widgets
+from . import clipboard as clipboard_utils
 from .audit_panel import AuditPanel
 from .category_dialog import CategoryDialog
 from .entry_dialog import EntryDialog
@@ -54,11 +55,14 @@ AUTO_SAVE_DELAY_MS = 400
 # ---------------------------------------------------------------- 列表卡片
 
 class EntryCard(QFrame):
-    """列表中的一条记录卡片。"""
+    """列表中的一条记录卡片。支持用键盘操作。"""
 
     clicked = Signal(str)
     activated = Signal(str)
     menu_requested = Signal(str, QPoint)
+    navigate = Signal(str, int)          # (记录 id, -1 上 / +1 下)
+    copy_requested = Signal(str)
+    delete_requested = Signal(str)
 
     def __init__(self, entry: Entry, selected: bool = False,
                  issues: list | None = None,
@@ -69,6 +73,7 @@ class EntryCard(QFrame):
         self.setCursor(Qt.PointingHandCursor)
         self.setProperty("selected", "true" if selected else "false")
         self.setFixedHeight(58)
+        self.setFocusPolicy(Qt.StrongFocus)      # 允许 Tab / 方向键落进来
 
         risks = [i for i in (issues or []) if i.is_risk]
 
@@ -128,6 +133,26 @@ class EntryCard(QFrame):
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         self.menu_requested.emit(self.entry_id, event.globalPos())
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        """键盘操作：上下切换、回车编辑、Ctrl+C 复制密码、Delete 删除。"""
+        key = event.key()
+        if key == Qt.Key_Up:
+            self.navigate.emit(self.entry_id, -1)
+            return
+        if key == Qt.Key_Down:
+            self.navigate.emit(self.entry_id, 1)
+            return
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            self.activated.emit(self.entry_id)
+            return
+        if key == Qt.Key_Delete:
+            self.delete_requested.emit(self.entry_id)
+            return
+        if key == Qt.Key_C and event.modifiers() & Qt.ControlModifier:
+            self.copy_requested.emit(self.entry_id)
+            return
+        super().keyPressEvent(event)
+
 
 # ---------------------------------------------------------------- 主窗口
 
@@ -143,6 +168,7 @@ class MainWindow(QWidget):
         self.filter_value = ""
         self.search_text = ""
         self.selected_id = ""
+        self.sort_key = vault.settings.sort_key
         self._cards: dict[str, EntryCard] = {}
         self._last_activity = time.monotonic()
         self._clipboard_timer: QTimer | None = None
@@ -287,6 +313,7 @@ class MainWindow(QWidget):
         top_row.setSpacing(8)
         self.search_box = SearchBox("搜索标题、账号、备注…")
         self.search_box.textChanged.connect(self._on_search_changed)
+        self.search_box.enter_list.connect(self._focus_first_card)
         top_row.addWidget(self.search_box, 1)
 
         self.new_button = IconButton("plus", "新建记录 (Ctrl+N)", token="accent_text", box=34, size=18)
@@ -300,9 +327,16 @@ class MainWindow(QWidget):
         top_row.addWidget(self.new_button)
         layout.addLayout(top_row)
 
+        caption_row = QHBoxLayout()
+        caption_row.setSpacing(6)
         self.list_caption = QLabel("")
         self.list_caption.setObjectName("Faint")
-        layout.addWidget(self.list_caption)
+        caption_row.addWidget(self.list_caption, 1)
+
+        self.sort_button = IconButton("sort", "排序方式", box=26, size=15)
+        self.sort_button.clicked.connect(self._show_sort_menu)
+        caption_row.addWidget(self.sort_button)
+        layout.addLayout(caption_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -480,8 +514,36 @@ class MainWindow(QWidget):
         if self.search_text:
             entries = [e for e in entries if e.matches(self.search_text)]
 
-        entries.sort(key=lambda e: (not e.favorite, e.title.lower()))
-        return entries
+        return self._sort_entries(entries)
+
+    def _sort_entries(self, entries: list[Entry]) -> list[Entry]:
+        """按当前选择的方式排序。"""
+        if self.sort_key == "updated":
+            return sorted(entries, key=lambda e: e.updated_at or "", reverse=True)
+        if self.sort_key == "created":
+            return sorted(entries, key=lambda e: e.created_at or "", reverse=True)
+        # 默认：收藏优先，再按名称
+        return sorted(entries, key=lambda e: (not e.favorite, e.title.lower()))
+
+    def _show_sort_menu(self) -> None:
+        """选择排序方式。"""
+        menu = QMenu(self)
+        for key in SORT_KEYS:
+            action = menu.addAction(SORT_LABELS[key])
+            action.setCheckable(True)
+            action.setChecked(key == self.sort_key)
+            action.triggered.connect(lambda _=False, k=key: self.set_sort(k))
+        menu.exec(self.sort_button.mapToGlobal(
+            QPoint(0, self.sort_button.height())))
+
+    def set_sort(self, key: str) -> None:
+        """切换排序方式并记住选择。"""
+        if key not in SORT_KEYS or key == self.sort_key:
+            return
+        self.sort_key = key
+        self.vault.settings.sort_key = key
+        self._save_vault()
+        self.refresh_list()
 
     def refresh_list(self) -> None:
         """重建列表卡片。"""
@@ -512,6 +574,9 @@ class MainWindow(QWidget):
                 card.clicked.connect(self.select_entry)
                 card.activated.connect(self.edit_entry)
                 card.menu_requested.connect(self._show_entry_menu)
+                card.navigate.connect(self._navigate_card)
+                card.copy_requested.connect(self._copy_password_of)
+                card.delete_requested.connect(self.delete_entry)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, card)
                 self._cards[entry.id] = card
 
@@ -526,6 +591,8 @@ class MainWindow(QWidget):
         if self.search_text:
             caption += f"　搜索「{self.search_text}」"
         self.list_caption.setText(f"{caption}　·　{len(entries)} 条")
+        self.sort_button.setToolTip(
+            f"排序方式：{SORT_LABELS.get(self.sort_key, '名称')}（点击切换）")
 
     # ------------------------------------------------------------ 详情
 
@@ -940,8 +1007,46 @@ class MainWindow(QWidget):
         self.refresh_list()
 
     def _clear_search(self) -> None:
+        """Esc：清空搜索并把焦点交回搜索框（无论当前焦点在列表还是别处）。"""
         if self.search_box.text():
             self.search_box.clear()
+        self.search_box.setFocus()
+
+    # ------------------------------------------------------------ 键盘操作
+
+    def _navigate_card(self, entry_id: str, delta: int) -> None:
+        """↑ / ↓ 在当前列表中切换记录。"""
+        order = list(self._cards)
+        if not order:
+            return
+        try:
+            index = order.index(entry_id)
+        except ValueError:
+            index = 0
+        target = order[max(0, min(len(order) - 1, index + delta))]
+        self.select_entry(target)
+        card = self._cards.get(target)
+        if card is not None:
+            card.setFocus()
+            self.list_scroll.ensureWidgetVisible(card)
+
+    def _focus_first_card(self) -> None:
+        """搜索框按 ↓：焦点进入列表（优先当前选中的那条）。"""
+        order = list(self._cards)
+        if not order:
+            return
+        target = self.selected_id if self.selected_id in self._cards else order[0]
+        self.select_entry(target)
+        card = self._cards.get(target)
+        if card is not None:
+            card.setFocus()
+            self.list_scroll.ensureWidgetVisible(card)
+
+    def _copy_password_of(self, entry_id: str) -> None:
+        """列表里按 Ctrl+C：复制该条记录的密码。"""
+        entry = self.vault.find(entry_id)
+        if entry is not None:
+            self.copy_text(entry.password, "密码", sensitive=True)
 
     def select_entry(self, entry_id: str) -> None:
         """选中一条记录。"""
@@ -1146,12 +1251,14 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------ 复制与显示
 
     def copy_text(self, text: str, what: str, *, sensitive: bool = False) -> None:
-        """复制到剪贴板；敏感内容会在设定时间后自动清空。"""
+        """复制到剪贴板。
+
+        敏感内容会被排除在 Windows 剪贴板历史与云同步之外，并按设定秒数清空。
+        """
         if not text:
             self.toast.show_message(f"没有可复制的{what}", danger=True)
             return
-        clipboard = QApplication.clipboard()
-        clipboard.setText(text)
+        clipboard_utils.put_text(text, sensitive=sensitive)
         seconds = self.vault.settings.clipboard_clear_seconds
         if sensitive and seconds > 0:
             self._schedule_clipboard_clear(text, seconds)
@@ -1164,13 +1271,7 @@ class MainWindow(QWidget):
             self._clipboard_timer.stop()
         timer = QTimer(self)
         timer.setSingleShot(True)
-
-        def clear() -> None:
-            clipboard = QApplication.clipboard()
-            if clipboard.text() == expected:      # 内容未被替换时才清空
-                clipboard.clear()
-
-        timer.timeout.connect(clear)
+        timer.timeout.connect(lambda: clipboard_utils.clear_if_unchanged(expected))
         timer.start(seconds * 1000)
         self._clipboard_timer = timer
 

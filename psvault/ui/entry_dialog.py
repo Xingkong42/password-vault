@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 from ..core import strength, totp
 from ..core.models import DEFAULT_CATEGORY, Entry
 from ..core.storage import Vault
+from . import clipboard as clipboard_utils
 from . import icons, widgets
 from .generator_dialog import GeneratorDialog
 from .widgets import IconButton, SecretLineEdit, StrengthMeter, text_button
@@ -96,7 +97,8 @@ class EntryDialog(QDialog):
         generate_button = IconButton("sparkles", "打开密码生成器", token="accent", box=30, size=16)
         generate_button.clicked.connect(self._open_generator)
         copy_password = IconButton("copy", "复制密码", box=30, size=15)
-        copy_password.clicked.connect(lambda: self._copy(self.password_edit.text(), "密码"))
+        copy_password.clicked.connect(
+            lambda: self._copy(self.password_edit.text(), "密码", sensitive=True))
 
         password_column = QVBoxLayout()
         password_column.setSpacing(8)
@@ -265,7 +267,8 @@ class EntryDialog(QDialog):
             row_layout.addWidget(label, 1)
 
             copy_button = IconButton("copy", "复制这条历史密码", box=26, size=14)
-            copy_button.clicked.connect(lambda _=False, p=item.password: self._copy(p, "历史密码"))
+            copy_button.clicked.connect(
+                lambda _=False, p=item.password: self._copy(p, "历史密码", sensitive=True))
             row_layout.addWidget(copy_button)
             row.setStyleSheet("border: 1px solid transparent;")
             self.history_layout.addWidget(row)
@@ -275,9 +278,10 @@ class EntryDialog(QDialog):
 
     # ------------------------------------------------------------ 交互
 
-    def _copy(self, text: str, what: str) -> None:
+    def _copy(self, text: str, what: str, *, sensitive: bool = False) -> None:
+        """复制字段内容；密码类内容不会被记进剪贴板历史。"""
         if text:
-            QApplication.clipboard().setText(text)
+            clipboard_utils.put_text(text, sensitive=sensitive)
 
     def _on_password_changed(self) -> None:
         password = self.password_edit.text()

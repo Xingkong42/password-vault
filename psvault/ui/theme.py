@@ -467,6 +467,8 @@ QTabBar::tab:hover:!selected { background: $hover; color: $text; }
     background: $accent_soft;
     border: 1px solid $accent_line;
 }
+/* 键盘焦点：比选中态更醒目一点，便于纯键盘操作时定位 */
+#EntryCard:focus { border: 1px solid $accent; }
 
 #TagChip {
     background: $hover;

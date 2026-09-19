@@ -60,6 +60,8 @@ SAMPLE = [
           url="http://192.168.1.1", category="开发"),
     Entry(title="某论坛", username="reader", password="taobao888",
           url="https://forum.example.com", category="社交"),
+    Entry(title="老论坛", username="olduser88", password="OldUser88#2024x",
+          url="http://bbs.old-forum.example.com", category="社交"),
     Entry(title="临时注册", username="temp", password="", category="未分类",
           notes="还没有设置密码"),
 ]

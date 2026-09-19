@@ -280,13 +280,44 @@ class Vault:
         except OSError:
             return False
 
-    def change_master_password(self, new_password: str) -> None:
-        """更换主密码：换盐、重新派生密钥并落盘。"""
+    def change_master_password(self, new_password: str, *,
+                               purge_old_backups: bool | None = None) -> int:
+        """更换主密码：换盐、重新派生密钥并落盘，返回清理掉的旧备份数量。
+
+        换完密钥后，所有历史备份都成了"旧主密码加密"的文件——直接恢复会打不开，
+        而用户多半已经忘了旧密码。所以这里会：
+          1. 立刻用新密码生成一份备份，保证总有一份能直接恢复的；
+          2. 只有在这份新备份确实写成功之后，才清理旧密码的备份。
+
+        purge_old_backups 为 None 时取设置里的偏好。
+        """
+        if purge_old_backups is None:
+            purge_old_backups = self.settings.rekey_purges_old_backups
+
+        manager = self.backup_manager()
+
         salt = crypto.new_salt()
         self._kdf = crypto.kdf_parameters(salt)
         self._key = crypto.derive_key(new_password, salt)
         self.meta["password_changed_at"] = now_iso()
-        self.save()
+        self.save()                     # 内部会先备份旧版本，再写入新密码版本
+
+        # 先确保有一份新密码的备份；写不出来就绝不动旧备份
+        fresh = manager.backup(force=True)
+        if not fresh or not purge_old_backups:
+            return 0
+
+        fresh_paths = {Path(p) for p in fresh}
+        removed = 0
+        for info in manager.list():
+            if info.path in fresh_paths:
+                continue                # 刚生成的那份要留着
+            try:
+                info.path.unlink()
+                removed += 1
+            except OSError:
+                continue
+        return removed
 
     def export_encrypted(self, target: str | Path, password: str | None = None) -> None:
         """导出加密备份。password 为 None 时沿用当前主密钥。"""

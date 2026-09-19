@@ -134,9 +134,15 @@ class AuditPanel(QWidget):
             count = counts.get(key, 0)
             if not count:
                 continue
-            kind = "danger" if key in ("weak", "reused") else (
-                "warning" if key == "aged" else "plain")
-            chips.addWidget(Badge(f"{label} {count}", kind))
+            if key in ("weak", "reused"):
+                kind = "danger"
+            elif key in ("aged", "guessable", "insecure"):
+                kind = "warning"
+            else:
+                kind = "plain"
+            # 用短标签，否则七类徽章排一行会被窗口边缘截断
+            short = strength.ISSUE_SHORT_LABELS.get(key, label)
+            chips.addWidget(Badge(f"{short} {count}", kind))
         chips.addStretch(1)
         column.addLayout(chips)
         layout.addLayout(column, 1)

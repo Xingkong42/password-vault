@@ -181,20 +181,32 @@ SEVERITY_LABELS = {
 # 列表卡片上用的短标签
 ISSUE_SHORT_LABELS = {
     "weak": "弱密码",
+    "guessable": "可被猜到",
     "reused": "重复使用",
     "aged": "久未更新",
     "empty": "未设密码",
+    "insecure": "明文 HTTP",
     "suggest": "可优化",
 }
 
 # 审计分组：key -> (标题, 图标, 一句话说明)
 ISSUE_GROUPS = (
     ("weak", "弱密码", "alert", "这些密码很容易被字典或暴力破解猜到"),
+    ("guessable", "可被猜到的密码", "user",
+     "密码里直接含账号名或网站名——知道这些信息的人很容易试出来"),
     ("reused", "重复使用的密码", "copy", "一处泄漏会连带其他账号一起失守"),
     ("aged", "长期未更换", "clock", "建议定期更换重要账号的密码"),
     ("empty", "未设置密码", "info", "这些记录还没有保存密码"),
+    ("insecure", "明文传输的网址", "globe",
+     "HTTP 不加密，密码在传输途中可能被截获（内网与本机地址不计入）"),
     ("suggest", "可以更好", "sparkles", "不影响使用，但做了会更安全"),
 )
+
+# 内网 / 本机地址：这些用 http 是正常的，不该报"明文传输"
+_PRIVATE_HOST_PREFIXES = ("127.", "10.", "192.168.", "169.254.")
+_PRIVATE_HOSTS = {"localhost", "::1", "0.0.0.0"}
+# 这些子域名太通用，不拿来判断"密码里含网站名"
+_GENERIC_SUBDOMAINS = {"www", "mail", "my", "app", "home", "login", "account"}
 
 
 @dataclass
@@ -240,9 +252,72 @@ def entry_issues(entry, entries: list, max_age_days: int = 180) -> list[Issue]:
     return issues
 
 
+def _is_insecure_url(url: str) -> bool:
+    """网址是否走明文 HTTP（内网、本机地址不算问题）。"""
+    text = (url or "").strip().lower()
+    if not text.startswith("http://"):
+        return False
+
+    host = text[len("http://"):].split("/")[0].split("?")[0].split("#")[0]
+    if "@" in host:                     # 形如 user:pass@host
+        host = host.rsplit("@", 1)[-1]
+    host = host.split(":")[0]
+    if not host:
+        return False
+    if host in _PRIVATE_HOSTS or host.endswith((".local", ".localhost")):
+        return False
+    if host.startswith(_PRIVATE_HOST_PREFIXES):
+        return False
+    if host.startswith("172."):         # 172.16.0.0 ~ 172.31.255.255
+        try:
+            if 16 <= int(host.split(".")[1]) <= 31:
+                return False
+        except (IndexError, ValueError):
+            pass
+    return True
+
+
+def _password_identifier_hit(entry) -> str:
+    """密码里是否直接含有账号名 / 网站名 / 标题，返回命中的那一类。
+
+    这是最典型的"好猜"密码构造：github 用 github2024#、某账号用自己名字。
+    单看字符集强度可能达标，但攻击者拿到账号信息后就能直接试出来。
+    """
+    password = (entry.password or "").lower()
+    if len(password) < 6:
+        return ""
+
+    candidates: list[tuple[str, str]] = []
+    local = (entry.username or "").split("@")[0].strip().lower()
+    if len(local) >= 4:
+        candidates.append(("账号名", local))
+
+    domain = entry.domain().split(".")[0].strip().lower()
+    if len(domain) >= 4 and domain not in _GENERIC_SUBDOMAINS:
+        candidates.append(("网站名", domain))
+
+    compact_title = re.sub(r"[^a-z0-9]", "", (entry.title or "").lower())
+    if len(compact_title) >= 4 and compact_title not in _GENERIC_SUBDOMAINS:
+        candidates.append(("标题", compact_title))
+
+    flattened = re.sub(r"[^a-z0-9]", "", password)   # 去掉符号后再比对
+    for label, token in candidates:
+        if token and token in flattened:
+            return label
+    return ""
+
+
 def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
     """收集一条记录身上的全部问题（不含忽略标记）。"""
     issues: list[Issue] = []
+
+    # 网址是否明文，和有没有存密码无关，先判断
+    if _is_insecure_url(entry.url):
+        issues.append(Issue(
+            kind="insecure", severity="medium",
+            title="网址使用明文 HTTP",
+            detail="HTTP 不加密，密码在传输途中可能被截获；建议确认网站是否支持 HTTPS",
+        ))
 
     if not entry.password:
         issues.append(Issue(
@@ -268,6 +343,15 @@ def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
             detail=reason,
         ))
 
+    # 强度够但构造好猜的情况（如 github2024#），单独作为一类问题
+    hit = _password_identifier_hit(entry)
+    if hit:
+        issues.append(Issue(
+            kind="guessable", severity="medium",
+            title=f"密码里包含{hit}",
+            detail=f"知道你的{hit}的人很容易猜到；建议换成与账号信息无关的密码",
+        ))
+
     same = [e for e in entries
             if e.id != entry.id and e.password and e.password == entry.password]
     if same:
@@ -280,12 +364,12 @@ def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
         ))
 
     if max_age_days > 0:
-        days = entry.age_days()
+        days = entry.password_age_days()      # 只看"换密码"的时间，不看改备注
         if days >= max_age_days:
             issues.append(Issue(
                 kind="aged", severity="medium",
-                title=f"已 {days} 天未修改密码",
-                detail=f"超过设定的 {max_age_days} 天，建议定期更换",
+                title=f"已 {days} 天未更换密码",
+                detail=f"密码上次更换于 {days} 天前，超过设定的 {max_age_days} 天",
             ))
 
     if not entry.totp_secret:

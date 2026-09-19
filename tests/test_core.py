@@ -125,6 +125,43 @@ class VaultTest(unittest.TestCase):
         reopened = Vault.open(self.path, "新主密码!234")
         self.assertEqual(len(reopened.entries), 1)
 
+    def _prepare_backups(self) -> None:
+        """把备份目录指到临时目录并先造出几份旧密码的备份。"""
+        self.vault.settings.backup_external_dir = str(Path(self.tmp.name) / "ext")
+        self.vault.settings.backup_external_enabled = True
+        self.vault.add_entry(Entry(title="A", password="x"))
+        self.vault.save()
+        self.vault.backup_manager().backup(force=True)
+
+    def test_change_master_password_refreshes_backups(self) -> None:
+        """改密后必须有一份新密码的备份，旧密码的备份被清理。"""
+        self._prepare_backups()
+        self.vault.settings.rekey_purges_old_backups = True
+        self.assertTrue(self.vault.backup_manager().list())
+
+        removed = self.vault.change_master_password("新主密码!234")
+        self.assertGreater(removed, 0, "应清理掉旧密码的备份")
+
+        backups = self.vault.backup_manager().list()
+        self.assertTrue(backups, "至少要留下一份能用的备份")
+        for info in backups:
+            reopened = Vault.open(info.path, "新主密码!234")
+            self.assertEqual(len(reopened.entries), 1)
+
+    def test_change_master_password_can_keep_old_backups(self) -> None:
+        self._prepare_backups()
+        removed = self.vault.change_master_password("新主密码!234",
+                                                    purge_old_backups=False)
+        self.assertEqual(removed, 0)
+        self.assertGreater(len(self.vault.backup_manager().list()), 1)
+
+    def test_editing_notes_keeps_password_age(self) -> None:
+        entry = self.vault.add_entry(Entry(title="A", password="Xk7#mQ2!vL9$pR4@"))
+        entry.password_changed_at = (datetime.now().astimezone()
+                                     - timedelta(days=400)).isoformat(timespec="seconds")
+        self.vault.update_entry(entry.id, {"notes": "只是改了个备注"})
+        self.assertGreaterEqual(self.vault.find(entry.id).password_age_days(), 399)
+
     def test_search(self) -> None:
         self.vault.add_entry(Entry(title="淘宝", username="shop", tags=["购物"]))
         self.vault.add_entry(Entry(title="GitHub", notes="代码托管"))
@@ -410,11 +447,44 @@ class EntryIssuesTest(unittest.TestCase):
     def test_aged_password(self) -> None:
         entry = Entry(title="A", password="Xk7#mQ2!vL9$pR4@")
         old = datetime.now().astimezone() - timedelta(days=400)
-        entry.updated_at = old.isoformat(timespec="seconds")
+        entry.password_changed_at = old.isoformat(timespec="seconds")
         issues = strength.entry_issues(entry, [entry], max_age_days=180)
         aged = next((i for i in issues if i.kind == "aged"), None)
         self.assertIsNotNone(aged)
         self.assertIn("400", aged.title)
+
+    def test_editing_other_fields_does_not_reset_password_age(self) -> None:
+        """回归用例：改备注会刷新 updated_at，但不该把密码年龄清零。"""
+        entry = Entry(title="A", password="Xk7#mQ2!vL9$pR4@")
+        old = datetime.now().astimezone() - timedelta(days=400)
+        entry.password_changed_at = old.isoformat(timespec="seconds")
+        entry.touch()                       # 模拟"只改了个备注"
+        self.assertEqual(entry.age_days(), 0)
+        self.assertGreaterEqual(entry.password_age_days(), 399)
+        self.assertIn("aged", [i.kind for i in
+                               strength.entry_issues(entry, [entry], max_age_days=180)])
+
+    def test_changing_password_resets_age(self) -> None:
+        entry = Entry(title="A", password="OldPass#1234")
+        entry.password_changed_at = (datetime.now().astimezone()
+                                     - timedelta(days=400)).isoformat(timespec="seconds")
+        entry.apply_password("NewPass#9876")
+        self.assertEqual(entry.password_age_days(), 0)
+
+    def test_legacy_entry_falls_back_to_updated_at(self) -> None:
+        """老数据没有 password_changed_at，用修改时间兜底，不能全部误报过期。"""
+        recent = datetime.now().astimezone() - timedelta(days=3)
+        entry = Entry.from_dict({
+            "title": "旧记录", "password": "Xk7#mQ2!vL9$pR4@",
+            "updated_at": recent.isoformat(timespec="seconds"),
+        })
+        self.assertLessEqual(entry.password_age_days(), 4)
+
+    def test_entry_roundtrip_keeps_password_changed_at(self) -> None:
+        entry = Entry(title="A", password="p")
+        entry.password_changed_at = "2025-01-02T03:04:05+08:00"
+        restored = Entry.from_dict(entry.to_dict())
+        self.assertEqual(restored.password_changed_at, "2025-01-02T03:04:05+08:00")
 
     def test_empty_password(self) -> None:
         entry = Entry(title="A", password="")
@@ -434,6 +504,73 @@ class EntryIssuesTest(unittest.TestCase):
         bad = Entry(title="坏", password="123456")
         result = strength.risk_entries([good, bad])
         self.assertEqual([e.title for e in result], ["坏"])
+
+
+    def test_guessable_by_site_name(self) -> None:
+        """密码里含网站名：强度可能达标，但仍要单独提示。"""
+        entry = Entry(title="GitHub", username="xingkong42",
+                      password="Github@2024#Secure", url="https://github.com")
+        hit = next((i for i in strength.entry_issues(entry, [entry])
+                    if i.kind == "guessable"), None)
+        self.assertIsNotNone(hit)
+        self.assertIn("网站名", hit.title)
+        self.assertIn("网站名", hit.detail)
+
+    def test_guessable_by_username(self) -> None:
+        entry = Entry(title="某站", username="zhangsan@example.com",
+                      password="zhangsan_2024!")
+        hit = next((i for i in strength.entry_issues(entry, [entry])
+                    if i.kind == "guessable"), None)
+        self.assertIsNotNone(hit)
+        self.assertIn("账号名", hit.title)
+
+    def test_unrelated_password_not_flagged(self) -> None:
+        entry = Entry(title="GitHub", username="xingkong42",
+                      password="Xk7#mQ2!vL9$pR4@")
+        self.assertNotIn("guessable", [i.kind for i in
+                                       strength.entry_issues(entry, [entry])])
+
+    def test_generic_subdomain_is_not_a_site_name(self) -> None:
+        """www / mail 这类通用子域不该拿来判定"密码含网站名"。"""
+        entry = Entry(title="邮箱", username="someone",
+                      password="Mail#2024!Secure", url="https://mail.example.com")
+        self.assertNotIn("guessable", [i.kind for i in
+                                       strength.entry_issues(entry, [entry])])
+
+    def test_insecure_http_flagged(self) -> None:
+        entry = Entry(title="老站", password="Xk7#mQ2!vL9$pR4@",
+                      url="http://old-site.example.com/login")
+        self.assertIn("insecure", [i.kind for i in
+                                   strength.entry_issues(entry, [entry])])
+
+    def test_https_not_flagged(self) -> None:
+        entry = Entry(title="新站", password="Xk7#mQ2!vL9$pR4@",
+                      url="https://new-site.example.com")
+        self.assertNotIn("insecure", [i.kind for i in
+                                      strength.entry_issues(entry, [entry])])
+
+    def test_internal_http_not_flagged(self) -> None:
+        """内网与本机地址用 http 是正常的，不该报警。"""
+        for url in ("http://192.168.1.1", "http://10.0.0.5/admin",
+                    "http://127.0.0.1:8080", "http://localhost:3000",
+                    "http://router.local", "http://172.16.0.1",
+                    "http://172.31.255.9", "http://169.254.1.1"):
+            entry = Entry(title="内网设备", password="Xk7#mQ2!vL9$pR4@", url=url)
+            self.assertNotIn("insecure", [i.kind for i in
+                                          strength.entry_issues(entry, [entry])],
+                             f"{url} 不应被判为明文传输风险")
+
+    def test_public_172_address_is_flagged(self) -> None:
+        """172.32 已经不属于内网段，应照常提醒。"""
+        entry = Entry(title="公网站点", password="Xk7#mQ2!vL9$pR4@",
+                      url="http://172.32.0.1")
+        self.assertIn("insecure", [i.kind for i in
+                                   strength.entry_issues(entry, [entry])])
+
+    def test_insecure_http_reported_even_without_password(self) -> None:
+        entry = Entry(title="空密码站", password="", url="http://plain.example.com")
+        self.assertIn("insecure", [i.kind for i in
+                                   strength.entry_issues(entry, [entry])])
 
 
 class BackupTest(unittest.TestCase):
@@ -692,6 +829,16 @@ class SettingsTest(unittest.TestCase):
 
     def test_invalid_theme(self) -> None:
         self.assertEqual(Settings.from_dict({"theme": "霓虹"}).theme, "light")
+
+    def test_sort_key_is_validated(self) -> None:
+        self.assertEqual(Settings().sort_key, "title")
+        self.assertEqual(Settings.from_dict({"sort_key": "created"}).sort_key, "created")
+        self.assertEqual(Settings.from_dict({"sort_key": "乱写的"}).sort_key, "title")
+
+    def test_rekey_purge_flag_roundtrip(self) -> None:
+        settings = Settings(rekey_purges_old_backups=False)
+        restored = Settings.from_dict(settings.to_dict())
+        self.assertFalse(restored.rekey_purges_old_backups)
 
 
 if __name__ == "__main__":
