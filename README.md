@@ -207,14 +207,18 @@ python main.py            # 从命令行启动（可见日志）
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 145 项
-python tests/live_check.py                            # 真实图形平台下的启动自检
+python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 146 项
+python tests/live_check.py                            # 真实图形平台下的启动与配色自检
 python tests/smoke_ui.py                              # 无头渲染全部窗口并截图到 tests/shots
 ```
 
 界面测试运行在 Qt 的 `offscreen` 平台上，不需要真实显示器。
 
-其中包含一项**源码卫生检查**：用 AST 扫描 `psvault/`，找出"`return` 之后还有语句"的代码块。
+`live_check.py` 除了启动窗口，还会**采样三个面板的实际背景色**，浅色与深色各验一遍。
+样式表覆盖不到的部件（典型是滚动区域的 viewport）会退回到系统调色板，在真实配色下
+露出一块与周围不同的底色——这类问题只有采样像素才看得出来。
+
+其中还包含一项**源码卫生检查**：用 AST 扫描 `psvault/`，找出"`return` 之后还有语句"的代码块。
 这类问题不会报错、也不会执行，静默失效——项目里曾经因此丢掉过设置窗口的整组按钮，
 所以把它固化成了测试。
 

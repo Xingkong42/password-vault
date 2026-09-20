@@ -711,6 +711,48 @@ class UiFlowTest(unittest.TestCase):
         self.assertTrue(Path(third).exists(), "被删除后必须重新生成")
         self.assertNotEqual(third, second)
 
+    def test_36_panel_backgrounds_come_from_the_palette(self) -> None:
+        """各面板的背景必须来自设计配色，不能落到系统调色板。
+
+        回归用例：QScrollArea 的 viewport 是独立 widget，样式表里只写
+        QScrollArea 覆盖不到它——于是它会用系统配色，在界面中间露出一块
+        与周围明显不一致的颜色（深色主题下尤其刺眼）。
+        """
+        from psvault.ui.theme import DARK, LIGHT, Theme
+
+        for index in range(4):      # 造点数据，让列表与详情都渲染出来
+            self._create_via_dialog(title=f"配色 {index}", password="Xk7#mQ2!vL9$pR4@")
+        self.window.set_filter("all")
+        self.window.select_entry(next(iter(self.window._cards)))
+        pump()
+
+        theme = Theme.instance()
+        for mode, palette in (("dark", DARK), ("light", LIGHT)):
+            theme.set_theme(mode)
+            theme.apply(APP)
+            self.window.rebuild_for_theme()
+            pump()
+
+            image = self.window.grab().toImage()
+            # 精确到每个面板该用哪个令牌：只断言"属于设计配色"是不够的，
+            # 那样列表栏错用成 canvas 也算通过。
+            expectations = {
+                "侧栏": (110, 420, palette.surface_alt),
+                "列表栏": (300, 700, palette.surface),
+                "详情栏": (900, 700, palette.canvas),
+            }
+            for name, (x, y, expected) in expectations.items():
+                actual = image.pixelColor(x, y).name().upper()
+                self.assertEqual(
+                    actual, expected.upper(),
+                    f"{mode} 主题下{name}的背景应为 {expected}，实际是 {actual}")
+
+        # 复位，避免影响后续用例
+        theme.set_theme("light")
+        theme.apply(APP)
+        self.window.rebuild_for_theme()
+        pump()
+
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""
         dialog = CategoryDialog(self.window, self.vault)

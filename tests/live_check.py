@@ -65,6 +65,38 @@ def main() -> int:
             failures.append("主窗口不可见")
         if window.totp_label.text() in ("—", ""):
             failures.append("动态口令未生成")
+
+        def sample_backgrounds(tag: str) -> None:
+            """面板背景必须来自设计配色。
+
+            样式表覆盖不到的部件（典型是滚动区域的 viewport）会退回调色板，
+            在真实系统配色下露出一块与周围明显不同的底色。
+            """
+            image = window.grab().toImage()
+            ratio = image.width() / max(window.width(), 1)   # 真实环境可能有 DPI 缩放
+            palette = Theme.instance().palette
+            for name, (x, y, expected) in {
+                "侧栏": (110, 420, palette.surface_alt),
+                "列表栏": (300, 700, palette.surface),
+                "详情栏": (900, 700, palette.canvas),
+            }.items():
+                actual = image.pixelColor(int(x * ratio), int(y * ratio)).name().upper()
+                if actual != expected.upper():
+                    failures.append(f"[{tag}]{name}背景 {actual} ≠ {expected.upper()}")
+                else:
+                    print(f"  [{tag}] {name}背景: {actual} ✓")
+
+        theme = Theme.instance()
+        sample_backgrounds("浅色")
+        theme.set_theme("dark")
+        theme.apply(app)
+        window.rebuild_for_theme()
+        for _ in range(3):
+            app.processEvents()
+        sample_backgrounds("深色")
+        theme.set_theme("light")
+        theme.apply(app)
+
         unlock.close()
         window.hide()
         app.quit()

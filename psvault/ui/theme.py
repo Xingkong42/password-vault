@@ -13,7 +13,7 @@ from pathlib import Path
 from string import Template
 
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 
 # 界面统一字体族（中文优先，逐级回退保证在各类环境下都有可用的中文字形）
 FONT_FAMILY = ('"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Segoe UI", '
@@ -335,6 +335,12 @@ QListWidget::item:selected { background: $accent_soft; color: $accent; }
 }
 
 /* ---------------------------------------------------------- 滚动条 */
+/* 注意：滚动区域的 viewport 是一个独立 widget，只写 QScrollArea 不够——
+   它没被覆盖时会落到 Qt 默认调色板（浅色模式下是 #EFEFEF，深色模式下是
+   系统的深灰），在面板里露出一块颜色不一致的底。必须显式透明，
+   让下层面板自己的背景透出来。 */
+QAbstractScrollArea { background: transparent; border: none; }
+QAbstractScrollArea > QWidget > QWidget { background: transparent; }
 QScrollArea { background: transparent; border: none; }
 QScrollBar:vertical {
     background: transparent;
@@ -639,6 +645,37 @@ class Theme(QObject):
         self._palette = palette
         self.changed.emit(palette.name)
 
+    def build_palette(self) -> QPalette:
+        """按当前配色构造 QPalette。
+
+        样式表覆盖不到的控件（各种滚动区域的 viewport、原生绘制的部件等）
+        会退回调色板取色——不设置的话就会用系统配色，于是深色主题下
+        冒出一块浅色或纯黑，跟周围对不上。这里把常用角色全部对齐到主题。
+        """
+        p = self._palette
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(p.canvas))
+        palette.setColor(QPalette.WindowText, QColor(p.text))
+        palette.setColor(QPalette.Base, QColor(p.surface))
+        palette.setColor(QPalette.AlternateBase, QColor(p.surface_alt))
+        palette.setColor(QPalette.Text, QColor(p.text))
+        palette.setColor(QPalette.PlaceholderText, QColor(p.text_faint))
+        palette.setColor(QPalette.Button, QColor(p.surface))
+        palette.setColor(QPalette.ButtonText, QColor(p.text))
+        palette.setColor(QPalette.BrightText, QColor(p.danger))
+        palette.setColor(QPalette.ToolTipBase, QColor(p.surface))
+        palette.setColor(QPalette.ToolTipText, QColor(p.text))
+        palette.setColor(QPalette.Highlight, QColor(p.accent))
+        palette.setColor(QPalette.HighlightedText, QColor(p.accent_text))
+        palette.setColor(QPalette.Link, QColor(p.accent))
+        palette.setColor(QPalette.Mid, QColor(p.border))
+        palette.setColor(QPalette.Dark, QColor(p.border_strong))
+        palette.setColor(QPalette.Disabled, QPalette.Text, QColor(p.text_faint))
+        palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor(p.text_faint))
+        palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(p.text_faint))
+        return palette
+
     def apply(self, app) -> None:
-        """把当前主题应用到 QApplication。"""
+        """把当前主题应用到 QApplication：先对齐调色板，再铺样式表。"""
+        app.setPalette(self.build_palette())
         app.setStyleSheet(build_qss(self._palette))
