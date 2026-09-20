@@ -36,12 +36,6 @@ class StrengthReport:
     warnings: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
 
-    @property
-    def percent(self) -> int:
-        """映射到 0~100 的进度值，便于界面展示。"""
-        return int(min(100, max(0, (self.score + 1) * 20 - (0 if self.score == 4 else 5))))
-
-
 def _charset_size(password: str) -> int:
     """根据出现的字符种类推断搜索空间大小。"""
     size = 0
@@ -158,8 +152,9 @@ def audit(entries: list, max_age_days: int = 180) -> dict[str, list]:
     保证界面各处口径一致。返回的每个列表里是同一条记录可能出现一次。
     """
     grouped: dict[str, list] = {"weak": [], "reused": [], "aged": [], "empty": []}
+    analyzed = analyze_entries(entries, max_age_days)
     for entry in entries:
-        for issue in entry_issues(entry, entries, max_age_days):
+        for issue in analyzed.get(entry.id, []):
             if issue.ignored or issue.kind not in grouped:
                 continue
             grouped[issue.kind].append(entry)
@@ -238,18 +233,42 @@ class Issue:
         return ISSUE_SHORT_LABELS.get(self.kind, "问题")
 
 
+def _finalize(entry, issues: list[Issue]) -> list[Issue]:
+    """统一打上"是否已忽略"的标记并排序（被忽略的排到最后）。"""
+    for issue in issues:
+        issue.ignored = entry.is_issue_ignored(issue.kind)
+    issues.sort(key=lambda item: (item.ignored, SEVERITY_ORDER.get(item.severity, 9)))
+    return issues
+
+
 def entry_issues(entry, entries: list, max_age_days: int = 180) -> list[Issue]:
     """检查单条记录，返回它存在的全部问题（按严重程度排序）。
 
-    这是审计视图、详情页风险提示共用的判定逻辑，保证两处口径一致。
-    返回的每一项都带好 `ignored` 标记（用户是否忽略过这类问题）。
+    详情页这类"只看一条"的场景用它；要看全部记录请用 `analyze_entries`——
+    逐条调用这里是 O(n²)，批量接口是 O(n)。
     """
-    issues = _collect_issues(entry, entries, max_age_days)
-    for issue in issues:
-        issue.ignored = entry.is_issue_ignored(issue.kind)
-    # 被忽略的排到后面，未处理的优先展示
-    issues.sort(key=lambda item: (item.ignored, SEVERITY_ORDER.get(item.severity, 9)))
-    return issues
+    return _finalize(entry, _collect_issues(entry, entries, max_age_days))
+
+
+def analyze_entries(entries: list, max_age_days: int = 180) -> dict[str, list[Issue]]:
+    """一次性体检全部记录，返回 {记录 id: 问题列表}。
+
+    重复密码的判定天然要看全部记录：`entry_issues` 每调用一次都要扫一遍
+    整个列表，审计视图逐条调用就是 O(n²)。这里先建一次"密码 → 记录"的
+    倒排索引，把整体降到 O(n)。
+    """
+    password_index: dict[str, list] = {}
+    for entry in entries:
+        if entry.password:
+            password_index.setdefault(entry.password, []).append(entry)
+
+    result: dict[str, list[Issue]] = {}
+    for entry in entries:
+        result[entry.id] = _finalize(
+            entry,
+            _collect_issues(entry, entries, max_age_days, password_index=password_index),
+        )
+    return result
 
 
 def _is_insecure_url(url: str) -> bool:
@@ -307,8 +326,12 @@ def _password_identifier_hit(entry) -> str:
     return ""
 
 
-def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
-    """收集一条记录身上的全部问题（不含忽略标记）。"""
+def _collect_issues(entry, entries: list, max_age_days: int,
+                    password_index: dict[str, list] | None = None) -> list[Issue]:
+    """收集一条记录身上的全部问题（不含忽略标记）。
+
+    password_index 给定时用它查重（O(1)），否则退回线性扫描。
+    """
     issues: list[Issue] = []
 
     # 网址是否明文，和有没有存密码无关，先判断
@@ -352,8 +375,11 @@ def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
             detail=f"知道你的{hit}的人很容易猜到；建议换成与账号信息无关的密码",
         ))
 
-    same = [e for e in entries
-            if e.id != entry.id and e.password and e.password == entry.password]
+    if password_index is not None:
+        same = [e for e in password_index.get(entry.password, []) if e.id != entry.id]
+    else:
+        same = [e for e in entries
+                if e.id != entry.id and e.password and e.password == entry.password]
     if same:
         names = "、".join(e.title for e in same[:3])
         more = f" 等 {len(same)} 条" if len(same) > 3 else ""
@@ -384,14 +410,22 @@ def _collect_issues(entry, entries: list, max_age_days: int) -> list[Issue]:
 
 def risk_entries(entries: list, max_age_days: int = 180) -> list:
     """筛出仍存在风险的记录（不含纯建议，也不含已全部忽略的）。"""
-    return [e for e in entries if any(i.is_risk for i in entry_issues(e, entries, max_age_days))]
+    analyzed = analyze_entries(entries, max_age_days)
+    return [e for e in entries if any(i.is_risk for i in analyzed.get(e.id, []))]
 
 
-def ignored_issues(entries: list, max_age_days: int = 180) -> list[tuple[object, Issue]]:
-    """列出被忽略、但问题当前依然存在的问题，供"恢复忽略"使用。"""
+def ignored_issues(entries: list, max_age_days: int = 180,
+                   analyzed: dict[str, list[Issue]] | None = None
+                   ) -> list[tuple[object, Issue]]:
+    """列出被忽略、但问题当前依然存在的问题，供"恢复忽略"使用。
+
+    analyzed 已算好时直接传入，避免重复体检一遍。
+    """
+    if analyzed is None:
+        analyzed = analyze_entries(entries, max_age_days)
     result: list[tuple[object, Issue]] = []
     for entry in entries:
-        for issue in entry_issues(entry, entries, max_age_days):
+        for issue in analyzed.get(entry.id, []):
             if issue.ignored and issue.severity_risk:
                 result.append((entry, issue))
     return result

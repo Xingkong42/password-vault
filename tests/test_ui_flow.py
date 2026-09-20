@@ -28,7 +28,13 @@ sys.path.insert(0, str(ROOT))
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog, QFrame, QLabel  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QFrame,
+    QLabel,
+    QPushButton,
+)
 
 from psvault.core import crypto, strength  # noqa: E402
 from psvault.core.models import Entry  # noqa: E402
@@ -38,6 +44,7 @@ from psvault.ui.audit_panel import AuditPanel  # noqa: E402
 from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
+from psvault.ui.settings_dialog import SettingsDialog  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -548,6 +555,39 @@ class UiFlowTest(unittest.TestCase):
         pump()
         self.assertEqual([self.vault.find(i).title for i in self.window._cards],
                          ["新", "旧"])
+
+    def test_30_settings_dialog_has_action_buttons(self) -> None:
+        """回归用例：设置窗口必须有保存/取消按钮。
+
+        曾经因为重构时把 footer 那几行插到了 `return scroll` 之后，
+        整组按钮永远不会被创建，而当时的测试只调 `_save()`，没走按钮，
+        所以没能发现。
+        """
+        dialog = SettingsDialog(self.window, self.vault)
+        dialog.show()
+        pump()
+
+        labels = [button.text() for button in dialog.findChildren(QPushButton)]
+        self.assertIn("保存设置", labels)
+        self.assertIn("取消", labels)
+
+        save = next(b for b in dialog.findChildren(QPushButton) if b.text() == "保存设置")
+        save.click()
+        pump()
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+        dialog.deleteLater()
+        pump()
+
+    def test_31_settings_cancel_button_rejects(self) -> None:
+        dialog = SettingsDialog(self.window, self.vault)
+        dialog.show()
+        pump()
+        cancel = next(b for b in dialog.findChildren(QPushButton) if b.text() == "取消")
+        cancel.click()
+        pump()
+        self.assertEqual(dialog.result(), QDialog.Rejected)
+        dialog.deleteLater()
+        pump()
 
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""

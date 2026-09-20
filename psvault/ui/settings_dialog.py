@@ -68,6 +68,17 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._scrollable(self._build_about_tab()), "关于")
         root.addWidget(tabs, 1)
 
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel = text_button("取消")
+        cancel.clicked.connect(self.reject)
+        footer.addWidget(cancel)
+        save = text_button("保存设置", kind="Primary", icon_name="check",
+                           token="accent_text", size=16)
+        save.clicked.connect(self._save)
+        footer.addWidget(save)
+        root.addLayout(footer)
+
     def _scrollable(self, page: QWidget) -> QWidget:
         """给设置页套一层滚动区域。
 
@@ -80,17 +91,6 @@ class SettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(page)
         return scroll
-
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        cancel = text_button("取消")
-        cancel.clicked.connect(self.reject)
-        footer.addWidget(cancel)
-        save = text_button("保存设置", kind="Primary", icon_name="check",
-                           token="accent_text", size=16)
-        save.clicked.connect(self._save)
-        footer.addWidget(save)
-        root.addLayout(footer)
 
     def _card(self, caption: str = "") -> tuple[QFrame, QVBoxLayout]:
         """创建一个带可选标题的设置卡片。"""

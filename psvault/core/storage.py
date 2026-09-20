@@ -213,9 +213,11 @@ class Vault:
     def save(self) -> None:
         """加密并原子写入磁盘。
 
-        顺序：留历史备份 → 写临时文件 → 原子替换 → 回读校验；
-        万一校验不通过（磁盘故障、被其他程序截断等），自动从最新备份回滚，
-        宁可回到上一个可用版本，也不留下一个打不开的文件。
+        顺序：留回滚点 →（可选）留历史备份 → 写临时文件 → 原子替换 → 回读校验。
+
+        回滚点与"自动备份"开关无关：覆盖前一定先把当前文件另存一份，校验通过
+        后立即删除。否则用户一旦关掉自动备份，或者历史备份因去重没有更新，
+        校验失败时就无路可退——留下一个打不开的文件。
         """
         if self.is_locked:
             raise crypto.VaultError("保险箱已锁定，无法保存")
@@ -227,7 +229,17 @@ class Vault:
         tmp_path.write_text(json.dumps(container, ensure_ascii=False, indent=2),
                             encoding="utf-8")
 
-        # 覆盖前先留一份带时间戳的历史备份（内容没变化时会自动跳过）
+        # 1) 先把"上一版"留成回滚点（与用户设置无关，保证一定有退路）
+        rollback_path = self.path.with_name(self.path.name + ".rollback")
+        has_rollback = False
+        if self.path.exists():
+            try:
+                shutil.copy2(self.path, rollback_path)
+                has_rollback = True
+            except OSError:
+                has_rollback = False
+
+        # 2) 用户开了自动备份的话，再留一份可长期保留的历史版本
         if self.settings.auto_backup and self.path.exists():
             try:
                 self.backup_manager().backup()
@@ -239,12 +251,25 @@ class Vault:
         try:
             self.verify_file()
         except Exception as exc:  # noqa: BLE001 - 任何异常都说明新文件不可用
-            restored = self._rollback_from_backup()
+            restored = False
+            if has_rollback:
+                try:
+                    shutil.copy2(rollback_path, self.path)
+                    restored = True
+                except OSError:
+                    restored = False
+            if not restored:
+                restored = self._rollback_from_backup()
+            if has_rollback:
+                rollback_path.unlink(missing_ok=True)
             raise crypto.VaultError(
                 f"写入后的校验没有通过（{exc}）；"
-                + ("已自动从最近的备份恢复上一版数据。" if restored
-                   else "且没有可用备份，请勿继续操作并检查磁盘。")
+                + ("已自动回滚到上一版数据。" if restored
+                   else "且没有可用的回滚点，请勿继续操作并检查磁盘。")
             ) from exc
+
+        if has_rollback:
+            rollback_path.unlink(missing_ok=True)
         self.dirty = False
 
     def restore_backup(self, backup_path: str | Path) -> None:
@@ -372,15 +397,16 @@ class Vault:
         for field_name in ("title", "username", "phone", "email", "url", "notes",
                            "category", "totp_secret"):
             if field_name in data:
-                setattr(entry, field_name, str(data[field_name]))
+                # 用 `or ""` 兜住 None，否则 str(None) 会写成字面量 "None"
+                setattr(entry, field_name, str(data[field_name] or ""))
         if "tags" in data:
-            entry.tags = [str(t) for t in data["tags"] if str(t).strip()]
+            entry.tags = [str(t) for t in (data["tags"] or []) if str(t).strip()]
         if "favorite" in data:
             entry.favorite = bool(data["favorite"])
         if new_password is not None:
             entry.apply_password(new_password)
         elif "password" in data:
-            entry.password = str(data["password"])
+            entry.password = str(data["password"] or "")
         entry.touch()
         if entry.category and entry.category not in self.categories:
             self.categories.append(entry.category)

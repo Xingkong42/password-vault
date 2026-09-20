@@ -198,12 +198,16 @@ python main.py            # 从命令行启动（可见日志）
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 118 项
+python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 127 项
 python tests/live_check.py                            # 真实图形平台下的启动自检
 python tests/smoke_ui.py                              # 无头渲染全部窗口并截图到 tests/shots
 ```
 
 界面测试运行在 Qt 的 `offscreen` 平台上，不需要真实显示器。
+
+其中包含一项**源码卫生检查**：用 AST 扫描 `psvault/`，找出"`return` 之后还有语句"的代码块。
+这类问题不会报错、也不会执行，静默失效——项目里曾经因此丢掉过设置窗口的整组按钮，
+所以把它固化成了测试。
 
 **剪贴板保护的验证**（Windows 剪贴板是系统级行为，值得偶尔实测一次）：
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -69,9 +70,20 @@ class VaultTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "v.psvault"
         self.vault = Vault.create(self.path, "Master#2024")
+        # 备份目录一律指向临时目录，任何测试都不该碰真实的「文档」目录
+        self.vault.settings.backup_external_dir = str(Path(self.tmp.name) / "external")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_update_entry_tolerates_none_values(self) -> None:
+        """字段传 None 时应存成空值，而不是字面量 "None"。"""
+        entry = self.vault.add_entry(Entry(title="A", password="p", notes="原有备注"))
+        self.vault.update_entry(entry.id, {"title": None, "notes": None, "tags": None})
+        updated = self.vault.find(entry.id)
+        self.assertEqual(updated.title, "")
+        self.assertEqual(updated.notes, "")
+        self.assertEqual(updated.tags, [])
 
     def test_create_and_open(self) -> None:
         self.vault.add_entry(Entry(title="GitHub", username="me", password="s3cret"))
@@ -572,6 +584,59 @@ class EntryIssuesTest(unittest.TestCase):
         self.assertIn("insecure", [i.kind for i in
                                    strength.entry_issues(entry, [entry])])
 
+    def test_analyze_matches_single_entry_api(self) -> None:
+        """批量接口与逐条接口必须给出完全一致的结果。"""
+        entries = [
+            Entry(title="甲", password="same-pass-1234"),
+            Entry(title="乙", password="same-pass-1234"),
+            Entry(title="丙", password="123456"),
+            Entry(title="丁", password=""),
+            Entry(title="戊", password="Xk7#mQ2!vL9$pR4@",
+                  totp_secret="JBSWY3DPEHPK3PXP"),
+        ]
+        analyzed = strength.analyze_entries(entries)
+        self.assertEqual(set(analyzed), {e.id for e in entries})
+        for entry in entries:
+            single = strength.entry_issues(entry, entries)
+            batch = analyzed[entry.id]
+            self.assertEqual([i.kind for i in single], [i.kind for i in batch])
+            for one, other in zip(single, batch):
+                self.assertEqual(one.title, other.title)
+                self.assertEqual(one.detail, other.detail)
+                self.assertEqual(one.severity, other.severity)
+                self.assertEqual(one.ignored, other.ignored)
+
+    def test_analyze_respects_ignored(self) -> None:
+        first = Entry(title="甲", password="123456")
+        second = Entry(title="乙", password="123456")
+        first.ignore_issue("weak")
+        analyzed = strength.analyze_entries([first, second])
+        weak = next(i for i in analyzed[first.id] if i.kind == "weak")
+        self.assertTrue(weak.ignored)
+
+    def test_analyze_is_not_slower_than_per_entry_calls(self) -> None:
+        """批量接口不该慢于逐条调用。
+
+        注意：实际耗时里密码强度评估占大头，重复比较只是其中一部分，
+        所以这里只断言"没有倒退"，不追求倍数。
+        """
+        entries = [Entry(title=f"站点{i}", password=f"Pass#{i:05d}x")
+                   for i in range(1200)]
+        for index in range(0, 1200, 2):          # 一半记录共用同一个密码
+            entries[index].password = "Shared#Pass123"
+
+        start = time.perf_counter()
+        analyzed = strength.analyze_entries(entries)
+        batch_elapsed = time.perf_counter() - start
+
+        start = time.perf_counter()
+        for entry in entries:
+            strength.entry_issues(entry, entries)
+        per_entry_elapsed = time.perf_counter() - start
+
+        self.assertEqual(len(analyzed), 1200)
+        self.assertLessEqual(batch_elapsed, per_entry_elapsed)
+
 
 class BackupTest(unittest.TestCase):
     """自动备份、清理与恢复。"""
@@ -691,6 +756,43 @@ class BackupTest(unittest.TestCase):
 
         reopened = Vault.open(self.path, "Master#2024")
         self.assertEqual([e.title for e in reopened.active_entries()], ["第一版"])
+
+    def test_rollback_works_without_auto_backup(self) -> None:
+        """回归用例：关掉自动备份时，校验失败也必须能回到上一版。
+
+        回滚靠的是"覆盖前另存的那一份"，而不是历史备份——否则用户一关
+        自动备份就失去了这条保命机制。
+        """
+        self.vault.settings.auto_backup = False
+        self.vault.add_entry(Entry(title="第一版", password="p"))
+        self.vault.save()
+        self.vault.add_entry(Entry(title="第二版", password="p"))
+
+        original = Vault.verify_file
+        calls = {"count": 0}
+
+        def flaky(inner_self, path=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise ValueError("模拟磁盘写入异常")
+            return original(inner_self, path)
+
+        Vault.verify_file = flaky
+        try:
+            with self.assertRaises(crypto.VaultError):
+                self.vault.save()
+        finally:
+            Vault.verify_file = original
+
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()], ["第一版"])
+
+    def test_rollback_point_is_cleaned_up(self) -> None:
+        """回滚点是临时文件，正常保存后不该留在数据目录里。"""
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+        rollback = self.path.with_name(self.path.name + ".rollback")
+        self.assertFalse(rollback.exists())
 
     def test_default_external_dir_uses_documents(self) -> None:
         from psvault.core.backup import default_external_dir
@@ -815,6 +917,38 @@ class BackupManagerUnitTest(unittest.TestCase):
         manager = BackupManager(self.dir / "v.psvault")
         with self.assertRaises(FileNotFoundError):
             manager.restore(self.dir / "没有这个文件.psvault")
+
+
+class SourceHygieneTest(unittest.TestCase):
+    """源码卫生检查：防止重构时留下永远不会执行的代码。
+
+    这类问题的典型成因是把新函数插进了旧函数中间——后面的语句就被
+    "吞"进了新函数、落在 return 之后，既不报错也不执行。
+    """
+
+    TERMINATORS = ("Return", "Raise", "Break", "Continue")
+
+    def test_no_statement_after_terminator(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "psvault"
+        offenders: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                for _field, value in ast.iter_fields(node):
+                    if not isinstance(value, list) or not value:
+                        continue
+                    if not all(isinstance(item, ast.stmt) for item in value):
+                        continue
+                    for index, stmt in enumerate(value[:-1]):
+                        if type(stmt).__name__ in self.TERMINATORS:
+                            dead = value[index + 1]
+                            offenders.append(
+                                f"{path.relative_to(root.parent)}:{stmt.lineno} "
+                                f"（第 {dead.lineno} 行起永远不会执行）")
+                            break
+        self.assertEqual(offenders, [], "发现死代码：" + "；".join(offenders))
 
 
 class SettingsTest(unittest.TestCase):

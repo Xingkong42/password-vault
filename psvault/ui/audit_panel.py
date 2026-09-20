@@ -57,19 +57,22 @@ class AuditPanel(QWidget):
         entries = self.vault.active_entries()
         max_age = self.vault.settings.password_max_age_days
 
+        # 一次批量体检（O(n)），避免逐条调用造成 O(n²)
+        analyzed = strength.analyze_entries(entries, max_age)
+
         grouped: dict[str, list[tuple[object, strength.Issue]]] = {
             key: [] for key, _title, _icon, _hint in strength.ISSUE_GROUPS
         }
         entries_with_risk = 0
         for entry in entries:
-            issues = strength.entry_issues(entry, entries, max_age)
+            issues = analyzed.get(entry.id, [])
             if any(issue.is_risk for issue in issues):
                 entries_with_risk += 1
             for issue in issues:
                 if issue.ignored:
                     continue        # 已忽略的单独放在报告末尾，不混进正式问题里
                 grouped.setdefault(issue.kind, []).append((entry, issue))
-        ignored_items = strength.ignored_issues(entries, max_age)
+        ignored_items = strength.ignored_issues(entries, max_age, analyzed=analyzed)
 
         risk_total = sum(
             len(grouped.get(key, []))

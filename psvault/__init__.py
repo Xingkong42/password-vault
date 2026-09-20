@@ -5,5 +5,5 @@
     psvault.ui     PySide6 界面层（主题、图标、控件、对话框、主窗口）
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 __app_name__ = "密码保险箱"

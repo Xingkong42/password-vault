@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QTimer
@@ -444,7 +443,6 @@ class UnlockDialog(QDialog):
             self._show_error("请输入主密码")
             return
         self._set_busy(True, "正在验证…")
-        started = time.perf_counter()
         try:
             vault = Vault.open(self.path, password)
         except crypto.InvalidPassword:
@@ -474,10 +472,8 @@ class UnlockDialog(QDialog):
             self._show_error(f"文件读取失败：{exc}")
             return
 
-        # 派生密钥本身耗时，过快返回说明文件异常，稍作停顿避免闪烁
-        elapsed = time.perf_counter() - started
-        if elapsed < 0.05:
-            time.sleep(0.05 - elapsed)
+        # 这里不再人为 sleep：scrypt 本身要 0.1~0.3 秒，不可能"过快返回"，
+        # 那段延时既不会触发、又会白白阻塞界面。
         self.vault = vault
         remember_vault_path(self.path)
         self.accept()

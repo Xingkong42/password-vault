@@ -562,13 +562,15 @@ class MainWindow(QWidget):
         else:
             self.list_empty.hide()
             self.list_scroll.show()
-            # 审计视图下把每条记录的具体问题直接标在卡片上
-            audit_pool = self.vault.active_entries()
-            max_age = self.vault.settings.password_max_age_days
+            # 审计视图下把每条记录的具体问题直接标在卡片上（批量算一次）
             show_issues = self.filter_kind == "audit"
+            analyzed: dict[str, list] = {}
+            if show_issues:
+                analyzed = strength.analyze_entries(
+                    self.vault.active_entries(),
+                    self.vault.settings.password_max_age_days)
             for entry in entries:
-                issues = (strength.entry_issues(entry, audit_pool, max_age)
-                          if show_issues else None)
+                issues = analyzed.get(entry.id) if show_issues else None
                 card = EntryCard(entry, selected=(entry.id == self.selected_id),
                                  issues=issues)
                 card.clicked.connect(self.select_entry)
