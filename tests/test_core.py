@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import time
@@ -839,6 +840,100 @@ class BackupTest(unittest.TestCase):
 
         reopened = Vault.open(self.path, "Master#2024")
         self.assertEqual([e.title for e in reopened.active_entries()], ["第一版"])
+
+    def test_temp_files_use_unique_names(self) -> None:
+        """临时文件必须一次一名。
+
+        固定名（vault.psvault.tmp）会让两个进程同时保存时往同一个文件里写，
+        互相踩坏内容——os.replace 的原子性挡不住这种覆盖。
+        """
+        names = set()
+        for _ in range(6):
+            path = self.vault._unique_sibling(".tmp")
+            names.add(path.name)
+            path.unlink()
+        self.assertEqual(len(names), 6)
+
+    def test_save_leaves_no_leftover_files(self) -> None:
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+        leftovers = sorted(p.name for p in self.path.parent.glob(f"{self.path.name}.*"))
+        self.assertEqual(leftovers, [], f"保存后不该留下临时文件：{leftovers}")
+
+    def test_verify_failure_leaves_no_leftover_files(self) -> None:
+        self.vault.add_entry(Entry(title="A", password="p"))
+        self.vault.save()
+        self.vault.add_entry(Entry(title="B", password="p"))
+
+        original = Vault.verify_file
+        calls = {"count": 0}
+
+        def flaky(inner_self, path=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise ValueError("模拟写入异常")
+            return original(inner_self, path)
+
+        Vault.verify_file = flaky
+        try:
+            with self.assertRaises(crypto.VaultError):
+                self.vault.save()
+        finally:
+            Vault.verify_file = original
+
+        leftovers = sorted(p.name for p in self.path.parent.glob(f"{self.path.name}.*"))
+        self.assertEqual(leftovers, [], f"回滚后不该留下临时文件：{leftovers}")
+
+    def test_cleanup_removes_only_stale_temp_files(self) -> None:
+        """崩溃残留的临时文件会被清掉，但刚写出来的不动（可能正被别的进程用）。"""
+        fresh = self.vault._unique_sibling(".tmp")
+        stale = self.vault._unique_sibling(".tmp")
+        old_time = time.time() - 48 * 3600
+        os.utime(stale, (old_time, old_time))
+
+        removed = self.vault.cleanup_temp_files(older_than_hours=24)
+        self.assertEqual(removed, 1)
+        self.assertTrue(fresh.exists(), "新鲜的临时文件不该被删")
+        self.assertFalse(stale.exists())
+        fresh.unlink()
+
+    def test_concurrent_saves_keep_file_intact(self) -> None:
+        """两个已解锁实例并发保存：文件必须始终可解密（数据归属由锁去管）。
+
+        注意这条只保证"不损坏"。"后写覆盖先写"要靠 main.py 的独占锁避免，
+        单元测试里无法验证跨进程锁。
+        """
+        import threading
+
+        self.vault.add_entry(Entry(title="初始", password="p"))
+        self.vault.save()
+
+        other = Vault.open(self.path, "Master#2024")
+        other.settings.backup_external_dir = self.vault.settings.backup_external_dir
+        errors: list[Exception] = []
+
+        def writer(vault, tag: str) -> None:
+            for index in range(6):
+                vault.update_entry(vault.entries[0].id, {"notes": f"{tag}{index}"})
+                try:
+                    vault.save()
+                except Exception as exc:      # noqa: BLE001 - 记录下来供断言
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(self.vault, "A")),
+                   threading.Thread(target=writer, args=(other, "B"))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # Windows 下并发写同一文件会因占用被直接拒绝，这是可接受的失败方式；
+        # 不可接受的是文件损坏。真正的"后写覆盖先写"由 main.py 的独占锁避免。
+        for exc in errors:
+            self.assertIsInstance(exc, (OSError, crypto.VaultError),
+                                  f"并发失败应当是 IO 层面或受控错误：{exc!r}")
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual(len(reopened.active_entries()), 1)
 
     def test_rollback_point_is_cleaned_up(self) -> None:
         """回滚点是临时文件，正常保存后不该留在数据目录里。"""

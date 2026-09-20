@@ -26,9 +26,6 @@ APP_BACKUP_FOLDER = "密码保险箱备份"
 LOCAL_BACKUP_FOLDER = "backups"
 TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
-# 单份备份的最小间隔（秒）：同一分钟内反复保存不重复备份
-MIN_INTERVAL_SECONDS = 20
-
 
 def default_external_dir() -> Path:
     """默认的外部备份目录：用户文档目录下的「密码保险箱备份」。"""

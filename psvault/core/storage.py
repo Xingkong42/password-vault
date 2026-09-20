@@ -12,6 +12,8 @@ import json
 import os
 import shutil
 import sys
+import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
@@ -46,6 +48,25 @@ SCHEMA_VERSION = 2
 def default_vault_path() -> Path:
     """返回默认保险箱文件路径。"""
     return DEFAULT_DATA_DIR / DEFAULT_VAULT_NAME
+
+
+def _replace_with_retry(tmp_path: Path, target: Path, attempts: int = 4) -> None:
+    """原子替换文件；目标被短暂占用时重试几次。
+
+    Windows 上只要目标文件正被别的程序打开（杀毒扫描、网盘同步、
+    另一个实例在读），`os.replace` 会直接抛 PermissionError。
+    这类占用通常是瞬时的，稍等再试往往就成功了。
+    """
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp_path, target)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def sanitize_filename(name: str) -> str:
@@ -225,34 +246,40 @@ class Vault:
         container = crypto.encrypt_payload(plaintext, self._key, self._kdf)
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_name(self.path.name + ".tmp")
-        tmp_path.write_text(json.dumps(container, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+        tmp_path = self._unique_sibling(".tmp")
+        rollback_path: Path | None = None
 
-        # 1) 先把"上一版"留成回滚点（与用户设置无关，保证一定有退路）
-        rollback_path = self.path.with_name(self.path.name + ".rollback")
-        has_rollback = False
-        if self.path.exists():
-            try:
-                shutil.copy2(self.path, rollback_path)
-                has_rollback = True
-            except OSError:
-                has_rollback = False
+        try:
+            tmp_path.write_text(json.dumps(container, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
 
-        # 2) 用户开了自动备份的话，再留一份可长期保留的历史版本
-        if self.settings.auto_backup and self.path.exists():
-            try:
-                self.backup_manager().backup()
-            except OSError:
-                pass                    # 备份失败不应阻断保存本身
+            # 1) 先把"上一版"留成回滚点（与用户设置无关，保证一定有退路）
+            if self.path.exists():
+                try:
+                    rollback_path = self._unique_sibling(".rollback")
+                    shutil.copy2(self.path, rollback_path)
+                except OSError:
+                    rollback_path = None
 
-        os.replace(tmp_path, self.path)
+            # 2) 用户开了自动备份的话，再留一份可长期保留的历史版本
+            if self.settings.auto_backup and self.path.exists():
+                try:
+                    self.backup_manager().backup()
+                except OSError:
+                    pass                # 备份失败不应阻断保存本身
+
+            _replace_with_retry(tmp_path, self.path)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            if rollback_path is not None:
+                rollback_path.unlink(missing_ok=True)
+            raise
 
         try:
             self.verify_file()
         except Exception as exc:  # noqa: BLE001 - 任何异常都说明新文件不可用
             restored = False
-            if has_rollback:
+            if rollback_path is not None and rollback_path.exists():
                 try:
                     shutil.copy2(rollback_path, self.path)
                     restored = True
@@ -260,17 +287,47 @@ class Vault:
                     restored = False
             if not restored:
                 restored = self._rollback_from_backup()
-            if has_rollback:
-                rollback_path.unlink(missing_ok=True)
             raise crypto.VaultError(
                 f"写入后的校验没有通过（{exc}）；"
                 + ("已自动回滚到上一版数据。" if restored
                    else "且没有可用的回滚点，请勿继续操作并检查磁盘。")
             ) from exc
+        finally:
+            if rollback_path is not None:
+                rollback_path.unlink(missing_ok=True)
 
-        if has_rollback:
-            rollback_path.unlink(missing_ok=True)
         self.dirty = False
+
+    def cleanup_temp_files(self, older_than_hours: int = 24) -> int:
+        """清理自己留下的临时文件（进程崩溃时可能残留），返回清理数量。
+
+        只删除明显过期的文件：刚写出来的临时文件可能正被另一个进程使用。
+        """
+        cutoff = time.time() - older_than_hours * 3600
+        removed = 0
+        for suffix in (".tmp", ".rollback"):
+            for path in self.path.parent.glob(f"{self.path.name}.*{suffix}"):
+                try:
+                    if path.is_file() and path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
+
+    def _unique_sibling(self, suffix: str) -> Path:
+        """在保险箱同目录下预留一个唯一命名的临时文件。
+
+        必须同目录：`os.replace` 只有在同一卷内才是原子的。
+
+        用固定名（如 `vault.psvault.tmp`）会留下竞态——两个进程同时保存时
+        会往同一个文件里写，把对方的内容踩坏，而 `os.replace` 本身
+        只能保证"要么旧要么新"，挡不住这种互相覆盖。
+        """
+        handle, name = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=suffix)
+        os.close(handle)
+        return Path(name)
 
     def restore_backup(self, backup_path: str | Path) -> None:
         """用一份备份覆盖当前文件，并把数据重新载入内存。

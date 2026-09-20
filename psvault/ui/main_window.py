@@ -998,7 +998,9 @@ class MainWindow(QWidget):
         header.addStretch(1)
         layout.addLayout(header)
 
-        for item in entry.history[:6]:
+        # 显示全部：长度本来就由设置里的"保留份数"控制，
+        # 这里再截一次会让"设置调大了却看不到"变成新的不一致。
+        for item in entry.history:
             line = QHBoxLayout()
             line.setSpacing(8)
             moment = (item.changed_at or "")[:19].replace("T", " ")

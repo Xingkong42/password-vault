@@ -46,7 +46,9 @@ from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
 from psvault.ui.generator_dialog import GeneratorDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.settings_dialog import SettingsDialog  # noqa: E402
+from psvault.ui.single_instance import VaultLock  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
+from psvault.ui.widgets import IconButton  # noqa: E402
 
 APP = QApplication.instance() or QApplication(sys.argv)
 
@@ -55,6 +57,47 @@ def pump(times: int = 3) -> None:
     """让 Qt 处理挂起事件。"""
     for _ in range(times):
         APP.processEvents()
+
+
+class VaultLockTest(unittest.TestCase):
+    """独占锁：同一份保险箱同一时间只能被一个实例编辑。"""
+
+    def test_lock_is_exclusive_then_released(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "v.psvault"
+            first = VaultLock()
+            self.assertTrue(first.acquire(path), "第一个实例应当拿到锁")
+
+            second = VaultLock()
+            self.assertFalse(second.acquire(path), "第二个实例必须被挡住")
+
+            first.release()
+            self.assertTrue(second.acquire(path), "锁释放后应当可以重新获取")
+            second.release()
+
+    def test_acquiring_same_path_twice_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "v.psvault"
+            lock = VaultLock()
+            self.assertTrue(lock.acquire(path))
+            self.assertTrue(lock.acquire(path), "重复获取自己持有的锁应当成功")
+            lock.release()
+
+    def test_switching_vault_releases_previous_lock(self) -> None:
+        """在解锁窗口选择另一个保险箱时，旧锁要释放，否则自己把自己挡住。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = Path(tmp) / "a.psvault"
+            second_path = Path(tmp) / "b.psvault"
+
+            lock = VaultLock()
+            self.assertTrue(lock.acquire(first_path))
+            self.assertTrue(lock.acquire(second_path))
+            self.assertEqual(Path(lock.path).name, "b.psvault.lock")
+
+            other = VaultLock()
+            self.assertTrue(other.acquire(first_path), "旧锁应当已经释放")
+            other.release()
+            lock.release()
 
 
 class UiFlowTest(unittest.TestCase):
@@ -628,6 +671,45 @@ class UiFlowTest(unittest.TestCase):
             self.assertTrue(mime.hasFormat("CanUploadToCloudClipboard"))
         dialog.deleteLater()
         pump()
+
+    def test_34_history_section_shows_all_entries(self) -> None:
+        """历史密码区要显示全部记录。
+
+        长度本来就由设置里的"保留份数"控制，界面再截一刀会让
+        "设置调大了却看不到"变成新的不一致。
+        """
+        self.vault.settings.history_limit = 10
+        entry = self._create_via_dialog(title="改密多次", password="p0")
+        for index in range(1, 6):
+            self.vault.update_entry(entry.id, {}, new_password=f"p{index}")
+        self.window.reload_all()
+        self.window.select_entry(entry.id)
+        pump()
+
+        labels = [label.text() for label in self.window.detail_host.findChildren(QLabel)]
+        self.assertIn("历史密码 · 5", labels)
+        copy_buttons = [button for button in
+                        self.window.detail_host.findChildren(IconButton)
+                        if button.toolTip() == "复制这条历史密码"]
+        self.assertEqual(len(copy_buttons), 5, "5 条历史都应渲染出来")
+
+    def test_35_theme_assets_are_unique_and_regenerable(self) -> None:
+        """主题小图标：每个实例用独立文件，文件被清理后能重新生成。"""
+        from psvault.ui import theme as theme_module
+
+        first = theme_module._asset_path("check", theme_module.LIGHT)
+        self.assertTrue(Path(first).exists())
+
+        # 模拟"另一个实例"：清掉缓存后应当得到另一个文件，而不是复用同一个
+        theme_module._ASSET_CACHE.clear()
+        second = theme_module._asset_path("check", theme_module.LIGHT)
+        self.assertNotEqual(first, second)
+
+        # 模拟"临时目录被系统清理"：复用时应当重新生成
+        Path(second).unlink()
+        third = theme_module._asset_path("check", theme_module.LIGHT)
+        self.assertTrue(Path(third).exists(), "被删除后必须重新生成")
+        self.assertNotEqual(third, second)
 
     def test_14_category_dialog_renders_rows(self) -> None:
         """分类管理窗口能正常渲染出每一行（避免 UI 构建期异常）。"""

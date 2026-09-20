@@ -19,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
 from psvault import __app_name__, __version__  # noqa: E402
 from psvault.ui import icons  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
+from psvault.ui.single_instance import VaultLock  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
 from psvault.ui.unlock_dialog import UnlockDialog  # noqa: E402
 
@@ -69,6 +70,21 @@ def main() -> int:
     theme.set_theme(vault.settings.theme)
     theme.apply(app)
 
+    # 独占锁：同一份保险箱同时只允许一个进程编辑。
+    # 两个窗口各自读到旧数据、又各自写回时，后写的会静默覆盖先写的；
+    # 单靠原子替换（os.replace）只能保证"文件不损坏"，挡不住这种丢数据。
+    vault_lock = VaultLock()
+
+    if not vault_lock.acquire(vault.path):
+        QMessageBox.warning(
+            None, "这个保险箱已经打开了",
+            f"「{vault.name}」正在被另一个密码保险箱窗口使用。\n\n"
+            "两个窗口同时编辑会互相覆盖，所以这里不再继续。\n"
+            "请切换到已经打开的那个窗口，或先把它关掉再试。")
+        return 1
+
+    vault.cleanup_temp_files()      # 清掉上次崩溃可能留下的临时文件
+
     window = MainWindow(vault)
     monitor = ActivityMonitor(window)
     app.installEventFilter(monitor)
@@ -78,6 +94,12 @@ def main() -> int:
         window.hide()
         again = UnlockDialog(path=window.vault.path)
         if again.exec() == QDialog.Accepted and again.vault is not None:
+            if not vault_lock.acquire(again.vault.path):
+                QMessageBox.warning(
+                    None, "这个保险箱已经打开了",
+                    f"「{again.vault.name}」正在被另一个窗口使用，无法在这里打开。")
+                app.quit()
+                return
             window.vault = again.vault
             window.selected_id = ""
             theme.set_theme(window.vault.settings.theme)

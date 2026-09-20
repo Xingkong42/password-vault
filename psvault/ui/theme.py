@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -527,17 +528,25 @@ _ASSET_CACHE: dict[str, str] = {}
 def _asset_path(kind: str, palette: Palette) -> str:
     """生成 QSS 需要的小图片（对勾、上下三角箭头），返回可用的 url 路径。
 
-    Qt 的样式表画不出对勾和三角形，只能用图片；这里在运行时绘制到系统
-    临时目录并按主题区分，因此不需要随程序附带任何资源文件。
+    Qt 的样式表画不出对勾和三角形，只能用图片；这里在运行时画出来写到
+    临时目录，因此不需要随程序附带任何资源文件。
+
+    两个细节：
+    * 文件名带随机后缀——多个实例用同一主题时不会互相覆盖；
+    * 复用缓存前先确认文件还在——临时目录被系统清理后能重新生成，
+      否则样式表会指向一个不存在的图标。
     """
     key = f"{kind}-{palette.name}"
-    if key in _ASSET_CACHE:
-        return _ASSET_CACHE[key]
+    cached = _ASSET_CACHE.get(key)
+    if cached is not None and Path(cached).exists():
+        return cached
 
     from PySide6.QtCore import QPointF, Qt
     from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap
 
-    target = Path(tempfile.gettempdir()) / f"psvault-{key}.png"
+    handle, name = tempfile.mkstemp(prefix=f"psvault-{key}-", suffix=".png")
+    os.close(handle)
+    target = Path(name)
 
     if kind == "check":
         pixmap = QPixmap(32, 32)
