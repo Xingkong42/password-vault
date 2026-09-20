@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication,
+    QToolTip,
     QButtonGroup,
     QCheckBox,
     QDialog,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import generator, strength
+from . import clipboard as clipboard_utils
 from . import icons, widgets
 from .widgets import IconButton, StrengthMeter, text_button
 
@@ -34,9 +35,11 @@ class GeneratorDialog(QDialog):
 
     MODES = (("random", "随机密码"), ("phrase", "易记短语"), ("pin", "数字 PIN"))
 
-    def __init__(self, parent: QWidget | None = None, initial_length: int = 18) -> None:
+    def __init__(self, parent: QWidget | None = None, initial_length: int = 18,
+                 settings=None) -> None:
         super().__init__(parent)
         self.password = ""
+        self._settings = settings          # 用于复制后的自动清空秒数
         self.setWindowTitle("密码生成器")
         self.setWindowIcon(icons.app_icon())
         self.setMinimumWidth(520)
@@ -311,8 +314,25 @@ class GeneratorDialog(QDialog):
         self._set_result(item.data(Qt.UserRole))
 
     def _copy(self) -> None:
-        if self.password:
-            QApplication.clipboard().setText(self.password)
+        """复制生成的密码。
+
+        走和主窗口一致的通道：声明"不记入剪贴板历史、不同步到云"，并按设置
+        若干秒后自动清空——这里复制的可是马上要拿去用的真密码，
+        不能因为它是"生成器"就绕过保护。
+        """
+        if not self.password:
+            return
+        clipboard_utils.put_text(self.password, sensitive=True)
+
+        seconds = int(getattr(self._settings, "clipboard_clear_seconds", 0) or 0)
+        if seconds > 0:
+            expected = self.password
+            QTimer.singleShot(seconds * 1000,
+                              lambda: clipboard_utils.clear_if_unchanged(expected))
+            tip = f"已复制，{seconds} 秒后自动清空剪贴板"
+        else:
+            tip = "已复制到剪贴板"
+        QToolTip.showText(self.copy_button.mapToGlobal(QPoint(0, -30)), tip)
 
     def _accept(self) -> None:
         if not self.password:
@@ -328,9 +348,13 @@ class GeneratorDialog(QDialog):
     # ------------------------------------------------------------ 静态入口
 
     @staticmethod
-    def get_password(parent: QWidget | None = None, initial_length: int = 18) -> str | None:
-        """弹出生成器，返回用户选定的密码；取消则返回 None。"""
-        dialog = GeneratorDialog(parent, initial_length)
+    def get_password(parent: QWidget | None = None, initial_length: int = 18,
+                     settings=None) -> str | None:
+        """弹出生成器，返回用户选定的密码；取消则返回 None。
+
+        settings 传入后，对话框里的"复制"会按其中的剪贴板策略处理。
+        """
+        dialog = GeneratorDialog(parent, initial_length, settings)
         if dialog.exec() == QDialog.Accepted:
             return dialog.password
         return None

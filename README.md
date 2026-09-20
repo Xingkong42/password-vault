@@ -198,7 +198,7 @@ python main.py            # 从命令行启动（可见日志）
 ## 测试
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 127 项
+python -m unittest discover -s tests -p "test_*.py"   # 核心 + 界面流程，共 135 项
 python tests/live_check.py                            # 真实图形平台下的启动自检
 python tests/smoke_ui.py                              # 无头渲染全部窗口并截图到 tests/shots
 ```

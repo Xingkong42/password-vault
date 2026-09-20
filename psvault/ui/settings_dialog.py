@@ -220,7 +220,7 @@ class SettingsDialog(QDialog):
         self.history_spin.setValue(self.vault.settings.history_limit)
         card_layout.addLayout(self._row(
             "每条记录保留的历史密码数量", self.history_spin,
-            "修改密码时旧密码会自动存入历史，方便找回。"))
+            "修改密码时旧密码会自动存入历史，方便找回；调小后立即裁剪已有记录。"))
         layout.addWidget(card)
 
         # 修改主密码
@@ -649,6 +649,7 @@ class SettingsDialog(QDialog):
         settings.history_limit = self.history_spin.value()
         settings.theme = "light" if self.theme_group.checkedId() == 0 else "dark"
         self._apply_backup_settings()
+        self.vault.prune_history()      # 调小保留份数时立即裁剪已有历史
         try:
             self.vault.save()
         except (OSError, crypto.VaultError) as exc:

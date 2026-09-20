@@ -43,6 +43,7 @@ from psvault.ui import icons  # noqa: E402
 from psvault.ui.audit_panel import AuditPanel  # noqa: E402
 from psvault.ui.category_dialog import CategoryDialog  # noqa: E402
 from psvault.ui.entry_dialog import EntryDialog  # noqa: E402
+from psvault.ui.generator_dialog import GeneratorDialog  # noqa: E402
 from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.settings_dialog import SettingsDialog  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
@@ -586,6 +587,45 @@ class UiFlowTest(unittest.TestCase):
         cancel.click()
         pump()
         self.assertEqual(dialog.result(), QDialog.Rejected)
+        dialog.deleteLater()
+        pump()
+
+    def test_32_detail_survives_invalid_totp(self) -> None:
+        """回归用例：含非法 TOTP 密钥的记录（如 CSV 导入的脏数据）不该让详情页崩溃。
+
+        EntryDialog 保存时会校验密钥，但 CSV/JSON 导入路径不会，
+        所以库里完全可能出现解析不出来的 totp_secret。
+        """
+        entry = self.vault.add_entry(Entry(title="脏数据记录", password="Xk7#mQ2!vL9$pR4@",
+                                           totp_secret="这不是一个合法的密钥"))
+        self.window.reload_all()
+        pump()
+
+        self.window.select_entry(entry.id)      # 修复前这里抛 AttributeError
+        pump()
+        self.assertIsNone(self.window.totp_label)
+        self.assertIsNone(self.window._totp_state)
+
+        # 每秒刷新与复制口令都不该崩
+        self.window._refresh_totp()
+        self.window._copy_totp()
+        pump()
+
+    def test_33_generator_copy_uses_sensitive_clipboard(self) -> None:
+        """生成器复制密码也要走统一通道（排除剪贴板历史 / 云同步）。"""
+        dialog = GeneratorDialog(self.window, 18, self.vault.settings)
+        dialog._generate()
+        self.assertTrue(dialog.password)
+
+        APP.clipboard().clear()
+        dialog._copy()
+        pump()
+
+        self.assertEqual(APP.clipboard().text(), dialog.password)
+        mime = APP.clipboard().mimeData()
+        if mime is not None:
+            self.assertTrue(mime.hasFormat("CanIncludeInClipboardHistory"))
+            self.assertTrue(mime.hasFormat("CanUploadToCloudClipboard"))
         dialog.deleteLater()
         pump()
 

@@ -8,7 +8,6 @@ from datetime import datetime
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -173,6 +172,7 @@ class MainWindow(QWidget):
         self._last_activity = time.monotonic()
         self._clipboard_timer: QTimer | None = None
         self._totp_state: tuple | None = None
+        self.totp_label: QLabel | None = None
 
         self.setWindowTitle(f"密码保险箱 — {vault.path.name}")
         self.setWindowIcon(icons.app_icon())
@@ -602,6 +602,7 @@ class MainWindow(QWidget):
         """重建详情面板。"""
         self._clear_layout(self.detail_layout)
         self._totp_state = None
+        self.totp_label = None          # 上一条记录的 TOTP 控件已随面板销毁
         # 换内容后回到顶部，否则会停在上一条记录的滚动位置
         self.detail_scroll.verticalScrollBar().setValue(0)
 
@@ -884,7 +885,8 @@ class MainWindow(QWidget):
 
     def _fix_password(self, entry: Entry) -> None:
         """用生成器给这条记录换一个新密码，并复制到剪贴板方便去网站改。"""
-        password = GeneratorDialog.get_password(self, max(len(entry.password), 18))
+        password = GeneratorDialog.get_password(
+            self, max(len(entry.password), 18), self.vault.settings)
         if not password:
             return
         self.vault.update_entry(entry.id, {}, new_password=password)
@@ -938,7 +940,9 @@ class MainWindow(QWidget):
         layout.setSpacing(10)
 
         icon_label = QLabel()
-        icon_label.setPixmap(icons.colored_pixmap("shield-check", "accent", 16))
+        icon_label.setPixmap(icons.colored_pixmap(
+            "alert" if config is None else "shield-check",
+            "danger" if config is None else "accent", 16))
         icon_label.setFixedWidth(18)
         layout.addWidget(icon_label)
 
@@ -947,6 +951,22 @@ class MainWindow(QWidget):
         caption = QLabel("两步验证口令")
         caption.setObjectName("FieldLabel")
         column.addWidget(caption)
+
+        if config is None:
+            # 导入的 CSV/JSON 可能带着无法解析的密钥（编辑窗口保存时会校验，
+            # 导入路径不会）。这里给出提示而不是让详情页整个崩掉。
+            broken = QLabel("密钥格式无法识别，请在编辑窗口重新填写")
+            broken.setObjectName("Danger")
+            broken.setWordWrap(True)
+            column.addWidget(broken)
+            layout.addLayout(column, 1)
+            fix_button = text_button("去修正", kind="Link")
+            fix_button.clicked.connect(lambda: self.edit_entry(entry.id))
+            layout.addWidget(fix_button)
+            self.totp_label = None
+            self._totp_state = None
+            return row
+
         self.totp_label = QLabel("—")
         self.totp_label.setObjectName("Mono")
         self.totp_label.setStyleSheet("font-size: 18px; font-weight: 600; letter-spacing: 2px;")
@@ -1289,8 +1309,8 @@ class MainWindow(QWidget):
             self.reveal_button.setToolTip("隐藏密码")
 
     def _copy_totp(self) -> None:
-        if self._totp_state is None:
-            return
+        if self._totp_state is None or self.totp_label is None:
+            return                      # 没有可用的 TOTP 配置（含密钥非法的情况）
         config, _secret = self._totp_state
         code = totp.generate_code(config.secret, digits=config.digits,
                                   period=config.period, algorithm=config.algorithm)
@@ -1310,7 +1330,7 @@ class MainWindow(QWidget):
     # ------------------------------------------------------------ 对话框
 
     def open_generator(self) -> None:
-        GeneratorDialog.get_password(self)
+        GeneratorDialog.get_password(self, settings=self.vault.settings)
 
     def manage_categories(self) -> None:
         """打开分类管理窗口（新建 / 重命名 / 删除）。"""
@@ -1438,13 +1458,23 @@ class MainWindow(QWidget):
         self.status_right.setText(f"自动锁定　{remaining // 60:02d}:{remaining % 60:02d}")
 
     def _refresh_totp(self) -> None:
-        """每秒刷新动态口令。"""
-        if self._totp_state is None:
+        """每秒刷新动态口令。
+
+        兜底 try：这个函数由定时器反复调用，任何一条脏数据都不该让
+        整个界面在后台报错。
+        """
+        if self._totp_state is None or self.totp_label is None:
             return
         config, _secret = self._totp_state
-        code = totp.generate_code(config.secret, digits=config.digits,
-                                  period=config.period, algorithm=config.algorithm)
-        remaining = totp.seconds_remaining(config.period)
+        try:
+            code = totp.generate_code(config.secret, digits=config.digits,
+                                      period=config.period, algorithm=config.algorithm)
+            remaining = totp.seconds_remaining(config.period)
+        except (ValueError, TypeError):     # binascii.Error 是 ValueError 的子类
+            self.totp_label.setText("密钥无法解析")
+            self.totp_countdown.setText("")
+            self._totp_state = None
+            return
         self.totp_label.setText(totp.format_code(code))
         self.totp_countdown.setText(f"{remaining} 秒后刷新")
 

@@ -63,7 +63,9 @@ def parse_otpauth(uri: str) -> TotpConfig | None:
     parsed = urlparse(uri)
     params = parse_qs(parsed.query)
     secret = (params.get("secret") or [""])[0]
-    if not secret:
+    # 必须校验：只判断"非空"的话，secret=??? 也会被当成有效配置，
+    # 等到生成口令时才在 b32decode 上炸掉。
+    if not secret or not is_valid_secret(secret):
         return None
     algorithm = (params.get("algorithm") or ["SHA1"])[0].upper()
     label = unquote(parsed.path.lstrip("/"))
@@ -71,25 +73,52 @@ def parse_otpauth(uri: str) -> TotpConfig | None:
     issuer = (params.get("issuer") or [""])[0]
     if not issuer and ":" in label:
         issuer = label.split(":")[0]
+    digits = _int_param(params, "digits", 6, minimum=4)
+    period = _int_param(params, "period", 30, minimum=5)
+    if digits is None or period is None:
+        return None                     # 参数畸形，视为整条链接不可用
     return TotpConfig(
         secret=normalize_secret(secret),
-        digits=int((params.get("digits") or ["6"])[0]),
-        period=int((params.get("period") or ["30"])[0]),
+        digits=digits,
+        period=period,
         algorithm=algorithm if algorithm in ALGORITHMS else "SHA1",
         issuer=issuer,
         account=account,
     )
 
 
+def _int_param(params: dict, name: str, default: int, *, minimum: int) -> int | None:
+    """读取整型查询参数。
+
+    缺省时用默认值；写了但不是合法整数（如 digits=abc）时返回 None——
+    这种情况下整条链接都不该被当成有效配置。
+    """
+    raw = (params.get(name) or [""])[0].strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= minimum else None
+
+
 def parse_secret_input(text: str) -> TotpConfig | None:
-    """把用户输入（可能是 otpauth 链接或裸密钥）解析成 TotpConfig。"""
+    """把用户输入（可能是 otpauth 链接或裸密钥）解析成 TotpConfig。
+
+    任何格式问题都返回 None，绝不向调用方抛异常——这个函数会被输入框的
+    textChanged 直接调用，抛异常会打断界面事件处理。
+    """
     text = (text or "").strip()
     if not text:
         return None
-    if text.lower().startswith("otpauth://"):
-        return parse_otpauth(text)
-    if is_valid_secret(text):
-        return TotpConfig(secret=normalize_secret(text))
+    try:
+        if text.lower().startswith("otpauth://"):
+            return parse_otpauth(text)
+        if is_valid_secret(text):
+            return TotpConfig(secret=normalize_secret(text))
+    except (ValueError, TypeError, binascii.Error):
+        return None
     return None
 
 

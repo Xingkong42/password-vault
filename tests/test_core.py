@@ -76,6 +76,37 @@ class VaultTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def test_history_limit_setting_is_respected(self) -> None:
+        """回归用例：设置里的"保留几条历史密码"必须真的生效。
+
+        之前 apply_password 写死用模块常量 10，设置项形同虚设。
+        """
+        self.vault.settings.history_limit = 3
+        entry = self.vault.add_entry(Entry(title="A", password="p0"))
+        for index in range(1, 8):
+            self.vault.update_entry(entry.id, {}, new_password=f"p{index}")
+        self.assertEqual(len(entry.history), 3)
+        self.assertEqual(entry.history[0].password, "p6")
+
+    def test_history_limit_zero_keeps_nothing(self) -> None:
+        self.vault.settings.history_limit = 0
+        entry = self.vault.add_entry(Entry(title="A", password="old"))
+        self.vault.update_entry(entry.id, {}, new_password="new")
+        self.assertEqual(entry.history, [])
+
+    def test_prune_history_trims_existing_records(self) -> None:
+        """把保留份数调小时，已有记录的历史应立即被裁剪。"""
+        self.vault.settings.history_limit = 10
+        entry = self.vault.add_entry(Entry(title="A", password="p0"))
+        for index in range(1, 6):
+            self.vault.update_entry(entry.id, {}, new_password=f"p{index}")
+        self.assertEqual(len(entry.history), 5)
+
+        self.vault.settings.history_limit = 2
+        self.assertEqual(self.vault.prune_history(), 3)
+        self.assertEqual(len(entry.history), 2)
+        self.assertEqual(entry.history[0].password, "p4")
+
     def test_update_entry_tolerates_none_values(self) -> None:
         """字段传 None 时应存成空值，而不是字面量 "None"。"""
         entry = self.vault.add_entry(Entry(title="A", password="p", notes="原有备注"))
@@ -286,6 +317,28 @@ class TotpTest(unittest.TestCase):
     def test_remaining(self) -> None:
         self.assertEqual(totp.seconds_remaining(30, at=0.0), 30)
         self.assertEqual(totp.seconds_remaining(30, at=29.0), 1)
+
+    def test_bad_numeric_params_return_none(self) -> None:
+        """畸形的 digits / period 应该判为不可解析，而不是抛 ValueError。"""
+        for uri in (
+            "otpauth://totp/Test:alice?secret=JBSWY3DPEHPK3PXP&digits=abc",
+            "otpauth://totp/Test:alice?secret=JBSWY3DPEHPK3PXP&period=xyz",
+            "otpauth://totp/Test:alice?secret=JBSWY3DPEHPK3PXP&digits=0",
+            "otpauth://totp/Test:alice?secret=JBSWY3DPEHPK3PXP&period=0",
+        ):
+            self.assertIsNone(totp.parse_secret_input(uri), uri)
+
+    def test_missing_params_use_defaults(self) -> None:
+        config = totp.parse_secret_input("otpauth://totp/Test:alice?secret=JBSWY3DPEHPK3PXP")
+        self.assertIsNotNone(config)
+        self.assertEqual(config.digits, 6)
+        self.assertEqual(config.period, 30)
+
+    def test_garbage_input_never_raises(self) -> None:
+        """解析入口绝不抛异常——它会被输入框的 textChanged 直接调用。"""
+        for text in ("这不是密钥", "abc!!!", "otpauth://", "otpauth://totp/",
+                     "otpauth://totp/x?secret=", "!!!@@@###", "otpauth://totp/x?secret=???"):
+            self.assertIsNone(totp.parse_secret_input(text), text)
 
 
 class PortingTest(unittest.TestCase):

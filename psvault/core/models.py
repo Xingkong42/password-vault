@@ -111,13 +111,18 @@ class Entry:
         """刷新修改时间。"""
         self.updated_at = now_iso()
 
-    def apply_password(self, new_password: str) -> None:
-        """修改密码，并把旧密码压入历史。"""
+    def apply_password(self, new_password: str, *, history_limit: int | None = None) -> None:
+        """修改密码，并把旧密码压入历史。
+
+        history_limit 由 Vault 传入用户的设置值；不传时退回模块默认值。
+        （此前这里写死用常量，导致设置里的"保留几条"完全不生效。）
+        """
         if new_password == self.password:
             return
         if self.password:
             self.history.insert(0, HistoryItem(password=self.password, changed_at=now_iso()))
-            del self.history[HISTORY_LIMIT:]
+            limit = HISTORY_LIMIT if history_limit is None else max(0, int(history_limit))
+            del self.history[limit:]
         self.password = new_password
         self.password_changed_at = now_iso()     # 密码年龄从这一刻重新算
         self.touch()

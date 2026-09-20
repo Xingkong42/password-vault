@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -316,7 +315,7 @@ class EntryDialog(QDialog):
     def _open_generator(self) -> None:
         current = self.password_edit.text()
         length = max(len(current), 18)
-        password = GeneratorDialog.get_password(self, length)
+        password = GeneratorDialog.get_password(self, length, self.vault.settings)
         if password:
             self.password_edit.setText(password)
 

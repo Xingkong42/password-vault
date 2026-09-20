@@ -404,7 +404,8 @@ class Vault:
         if "favorite" in data:
             entry.favorite = bool(data["favorite"])
         if new_password is not None:
-            entry.apply_password(new_password)
+            entry.apply_password(new_password,
+                                 history_limit=self.settings.history_limit)
         elif "password" in data:
             entry.password = str(data["password"] or "")
         entry.touch()
@@ -446,6 +447,21 @@ class Vault:
         self.entries = self.active_entries()
         self.dirty = self.dirty or count > 0
         return count
+
+    def prune_history(self, limit: int | None = None) -> int:
+        """把所有记录的密码历史裁剪到指定条数，返回删除的条数。
+
+        用户把"保留份数"调小时立即生效，不必等下次改密码。
+        """
+        limit = self.settings.history_limit if limit is None else max(0, int(limit))
+        removed = 0
+        for entry in self.entries:
+            if len(entry.history) > limit:
+                removed += len(entry.history) - limit
+                del entry.history[limit:]
+        if removed:
+            self.dirty = True
+        return removed
 
     def ignore_issue(self, entry_id: str, kind: str) -> bool:
         """忽略某条记录的某类问题（不再出现在安全审计里）。"""
