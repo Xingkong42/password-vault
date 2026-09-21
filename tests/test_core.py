@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -706,6 +707,89 @@ class BackupTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_save_backs_up_the_new_version(self) -> None:
+        """回归用例：备份里必须有"刚保存的最新状态"。
+
+        从前备份的是被覆盖的旧版本，于是文件误删后恢复只能拿到上一版，
+        最新那条记录在任何备份里都不存在。
+        """
+        for index in range(1, 4):
+            self.vault.add_entry(Entry(title=f"记录{index}", password="p"))
+            self.vault.save()
+
+        newest = self.vault.backup_manager().latest()
+        self.assertIsNotNone(newest)
+        reopened = Vault.open(newest.path, "Master#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()],
+                         ["记录1", "记录2", "记录3"])
+
+    def test_latest_is_really_the_newest_within_same_second(self) -> None:
+        """同一秒内产生的多份备份，latest() 选出的必须真的是最新的那份。
+
+        备份列表此前按文件 mtime 排序，同秒多份的顺序不稳定，用户按"最新"选
+        可能正好选中空库——这正是上一次踩的坑。
+        """
+        for index in range(1, 5):
+            self.vault.add_entry(Entry(title=f"记录{index}", password="p"))
+            self.vault.save()
+
+        newest = self.vault.backup_manager().latest()
+        self.assertIsNotNone(newest)
+        reopened = Vault.open(newest.path, "Master#2024")
+        self.assertEqual(len(reopened.active_entries()), 4)
+
+    def test_disaster_recovery_returns_latest_data(self) -> None:
+        """端到端演练：整个数据目录被删后，从备份恢复要能拿回最新数据。
+
+        外部备份必须放在数据目录**之外**（真实场景是「文档」目录），
+        否则删了 data 连它一起没，也就没有这次演练的意义了。
+        """
+        outside = Path(tempfile.mkdtemp(prefix="psvault-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        self.vault.settings.backup_external_dir = str(outside)
+
+        for index in range(1, 4):
+            self.vault.add_entry(Entry(title=f"记录{index}", password="p"))
+            self.vault.save()
+        expected = [e.title for e in self.vault.active_entries()]
+
+        shutil.rmtree(self.path.parent)             # 连同本地 backups 一起删掉
+        self.assertFalse(self.path.exists())
+
+        manager = BackupManager(self.path, external_dir=outside)
+        backups = manager.list()
+        self.assertTrue(backups, "外部备份应当还在")
+        manager.restore(backups[0].path)
+
+        reopened = Vault.open(self.path, "Master#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()], expected)
+
+    def test_failed_save_does_not_create_backup(self) -> None:
+        """校验失败的保存不该留下备份——备份里只能是能打开的好文件。"""
+        self.vault.add_entry(Entry(title="第一版", password="p"))
+        self.vault.save()
+        before = len(self.vault.backup_manager().list())
+
+        self.vault.add_entry(Entry(title="第二版", password="p"))
+        original = Vault.verify_file
+        calls = {"count": 0}
+
+        def flaky(inner_self, path=None):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise ValueError("模拟写入异常")
+            return original(inner_self, path)
+
+        Vault.verify_file = flaky
+        try:
+            with self.assertRaises(crypto.VaultError):
+                self.vault.save()
+        finally:
+            Vault.verify_file = original
+
+        self.assertEqual(len(self.vault.backup_manager().list()), before,
+                         "校验失败不该产生新备份")
 
     def test_backup_skips_unchanged_content(self) -> None:
         self.vault.add_entry(Entry(title="A", password="p"))

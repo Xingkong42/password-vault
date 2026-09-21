@@ -294,43 +294,92 @@ class UnlockDialog(QDialog):
         return BackupManager(self.path, external_dir=default_external_dir())
 
     def _refresh_backup_hint(self) -> None:
-        """在解锁界面显示备份状况，让用户知道数据有兜底。"""
+        """在解锁界面显示备份状况，让用户知道数据有兜底。
+
+        注意主文件不存在时**不能把入口藏起来**——文件被误删恰恰是最需要
+        "从备份恢复"的时刻，之前正是在这种情况下把恢复入口隐藏了。
+        """
+        backups = self._backup_manager().list()
+
         if not self.path.exists():
-            self.backup_label.setText("")
-            self.restore_link.hide()
+            if backups:
+                self.backup_label.setText(
+                    f"找不到保险箱文件　·　检测到 {len(backups)} 份备份")
+                self.restore_link.setText("从备份恢复…")
+                self.restore_link.show()
+            else:
+                self.backup_label.setText("找不到保险箱文件")
+                self.restore_link.hide()
             self._fit_height()
             return
 
-        backups = self._backup_manager().list()
         if not backups:
             self.backup_label.setText("尚无备份")
             self.restore_link.hide()
         else:
             self.backup_label.setText(
                 f"备份 {len(backups)} 份　·　最近 {backups[0].display_time()}")
+            self.restore_link.setText("从备份恢复…")
             self.restore_link.show()
         self._fit_height()
 
+    def _ask_backup_password(self) -> str | None:
+        """为"查看备份里有什么"要一次主密码（只读取，不改动任何文件）。"""
+        password, ok = QInputDialog.getText(
+            self, "查看备份内容",
+            "输入主密码，用来读出每份备份里有多少条记录：\n"
+            "（只是读取，不会修改任何文件）",
+            QLineEdit.Password)
+        if not ok:
+            return None
+        return password or None
+
     def _restore_from_backup(self) -> None:
-        """从备份恢复损坏 / 丢失的保险箱文件。"""
+        """从备份恢复损坏 / 丢失的保险箱文件。
+
+        选之前先让用户输入一次主密码，把每份备份里的记录数读出来显示在列表里——
+        "恢复完才发现拿到的是一份空库"正是上一版踩过的坑。
+        """
         manager = self._backup_manager()
         backups = manager.list()
         if not backups:
             QMessageBox.information(self, "没有备份", "没有找到可用的备份文件。")
             return
 
-        labels = [f"{info.location}　{info.display_time()}　{info.display_size()}"
-                  for info in backups]
+        password = self._ask_backup_password()
+        if password is None:
+            return
+
+        labels: list[str] = []
+        readable: dict[int, int] = {}       # 下标 -> 记录数
+        for index, info in enumerate(backups):
+            base = f"{info.location}　{info.display_time()}　{info.display_size()}"
+            try:
+                vault = Vault.open(info.path, password)
+            except crypto.VaultError:
+                labels.append(f"{base}　·　（这份打不开，可能用的是别的主密码）")
+                continue
+            count = len(vault.active_entries())
+            readable[index] = count
+            labels.append(f"{base}　·　{count} 条记录")
+
         label, ok = QInputDialog.getItem(
             self, "从备份恢复", "选择要恢复的备份：", labels, 0, False)
         if not ok:
             return
-        info = backups[labels.index(label)]
 
+        index = labels.index(label)
+        if index not in readable:
+            QMessageBox.warning(self, "无法恢复",
+                                "这份备份用该主密码打不开，请换一份试试。")
+            return
+
+        info = backups[index]
+        count = readable[index]
         answer = QMessageBox.warning(
             self, "确认恢复",
             f"将用这份备份覆盖当前保险箱文件：\n{info.path}\n\n"
-            "当前文件会先自动另存一份，确定继续吗？",
+            f"它包含 {count} 条记录。当前文件会先自动另存一份，确定继续吗？",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
@@ -343,12 +392,12 @@ class UnlockDialog(QDialog):
 
         QMessageBox.information(
             self, "恢复完成",
-            "已从备份恢复。\n\n请输入这份备份对应的主密码解锁"
-            "（如果后来改过主密码，请用改之前的那个）。")
+            f"已恢复这份包含 {count} 条记录的备份。\n\n"
+            "请输入它的主密码解锁（如果后来改过主密码，请用改之前的那个）。")
         self.error_label.setText("")
         self.password_edit.clear()
-        self._refresh_backup_hint()
-        self.password_edit.setFocus()
+        self.mode = "unlock"        # 文件已经回来了，切回解锁模式
+        self._apply_mode()
 
     def _on_name_changed(self, text: str) -> None:
         """创建时按名称推荐同名的默认文件名（用户手动选过位置则不再改动）。"""

@@ -232,13 +232,17 @@ class Vault:
         crypto.decrypt_payload(container, self._key)
 
     def save(self) -> None:
-        """加密并原子写入磁盘。
+        """加密并原子写入磁盘，然后为这份新内容留一份备份。
 
-        顺序：留回滚点 →（可选）留历史备份 → 写临时文件 → 原子替换 → 回读校验。
+        顺序：留回滚点 → 写临时文件 → 原子替换 → 回读校验 → 校验通过才备份。
 
-        回滚点与"自动备份"开关无关：覆盖前一定先把当前文件另存一份，校验通过
-        后立即删除。否则用户一旦关掉自动备份，或者历史备份因去重没有更新，
-        校验失败时就无路可退——留下一个打不开的文件。
+        两个要点：
+
+        * **回滚点**与"自动备份"开关无关：覆盖前一定先把当前文件另存一份，
+          校验失败时用它退回去，用完立即删除。
+        * **备份的是刚存好的新版本，而不是被覆盖的旧版本**。早先反过来做，
+          结果备份里永远缺最新状态——文件误删后恢复只能拿到上一版，
+          最新那条记录在哪儿都找不到。
         """
         if self.is_locked:
             raise crypto.VaultError("保险箱已锁定，无法保存")
@@ -261,13 +265,7 @@ class Vault:
                 except OSError:
                     rollback_path = None
 
-            # 2) 用户开了自动备份的话，再留一份可长期保留的历史版本
-            if self.settings.auto_backup and self.path.exists():
-                try:
-                    self.backup_manager().backup()
-                except OSError:
-                    pass                # 备份失败不应阻断保存本身
-
+            # 2) 原子替换
             _replace_with_retry(tmp_path, self.path)
         except OSError:
             tmp_path.unlink(missing_ok=True)
@@ -287,14 +285,23 @@ class Vault:
                     restored = False
             if not restored:
                 restored = self._rollback_from_backup()
+            if rollback_path is not None:
+                rollback_path.unlink(missing_ok=True)
             raise crypto.VaultError(
                 f"写入后的校验没有通过（{exc}）；"
                 + ("已自动回滚到上一版数据。" if restored
                    else "且没有可用的回滚点，请勿继续操作并检查磁盘。")
             ) from exc
-        finally:
-            if rollback_path is not None:
-                rollback_path.unlink(missing_ok=True)
+
+        if rollback_path is not None:
+            rollback_path.unlink(missing_ok=True)
+
+        # 4) 校验通过，才把这份新内容留成备份——备份的必须是能打开的好文件
+        if self.settings.auto_backup:
+            try:
+                self.backup_manager().backup()
+            except OSError:
+                pass                    # 备份失败不应影响保存本身
 
         self.dirty = False
 

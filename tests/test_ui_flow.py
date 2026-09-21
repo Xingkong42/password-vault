@@ -26,13 +26,17 @@ for stream in (sys.stdout, sys.stderr):
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from unittest.mock import patch  # noqa: E402
+
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QDialog,
     QFrame,
+    QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
 )
 
@@ -48,6 +52,7 @@ from psvault.ui.main_window import MainWindow  # noqa: E402
 from psvault.ui.settings_dialog import SettingsDialog  # noqa: E402
 from psvault.ui.single_instance import VaultLock  # noqa: E402
 from psvault.ui.theme import Theme  # noqa: E402
+from psvault.ui.unlock_dialog import UnlockDialog  # noqa: E402
 from psvault.ui.widgets import IconButton  # noqa: E402
 
 APP = QApplication.instance() or QApplication(sys.argv)
@@ -751,6 +756,59 @@ class UiFlowTest(unittest.TestCase):
         theme.set_theme("light")
         theme.apply(APP)
         self.window.rebuild_for_theme()
+        pump()
+
+    def test_37_restore_entry_visible_when_file_is_missing(self) -> None:
+        """文件被误删时，解锁窗口仍然要给出「从备份恢复」入口。
+
+        回归用例：原先主文件不存在就把备份提示和恢复链接一并隐藏，
+        而那恰恰是最需要它的时候——用户只能手动去目录里翻备份文件。
+        """
+        self._create_via_dialog(title="备份内容", password="Xk7#mQ2!vL9$pR4@")
+        self.vault.backup_manager().backup(force=True)
+        self.assertTrue(self.vault.backup_manager().list())
+
+        self.path.unlink()          # 模拟文件被删：路径不变，只是文件没了
+        self.assertFalse(self.path.exists())
+
+        dialog = UnlockDialog(path=self.path)
+        dialog.show()
+        pump()
+        try:
+            self.assertIn("找不到", dialog.backup_label.text())
+            self.assertTrue(dialog.restore_link.isVisible(),
+                            "文件不存在时也必须能看到恢复入口")
+        finally:
+            dialog.hide()
+            dialog.deleteLater()
+            pump()
+
+    def test_38_restore_from_unlock_switches_to_unlock_mode(self) -> None:
+        """从备份恢复后要切回「解锁」模式——文件已经回来了。"""
+        self._create_via_dialog(title="备份内容", password="Xk7#mQ2!vL9$pR4@")
+        self.vault.backup_manager().backup(force=True)
+
+        self.path.unlink()          # 模拟文件被删：路径不变，只是文件没了
+        dialog = UnlockDialog(path=self.path)
+        self.assertEqual(dialog.mode, "create")     # 文件不存在 → 创建模式
+
+        with patch.object(QInputDialog, "getText",
+                          return_value=("FlowTest#2024", True)), \
+                patch.object(QInputDialog, "getItem",
+                             side_effect=lambda *args, **kwargs: (args[3][0], True)), \
+                patch.object(QMessageBox, "warning", return_value=QMessageBox.Yes), \
+                patch.object(QMessageBox, "information", return_value=QMessageBox.Ok):
+            dialog._restore_from_backup()
+        pump()
+
+        self.assertTrue(self.path.exists(), "恢复后文件应当存在")
+        self.assertEqual(dialog.mode, "unlock", "恢复后应切回解锁模式")
+
+        reopened = Vault.open(self.path, "FlowTest#2024")
+        self.assertEqual([e.title for e in reopened.active_entries()], ["备份内容"])
+
+        dialog.hide()
+        dialog.deleteLater()
         pump()
 
     def test_14_category_dialog_renders_rows(self) -> None:

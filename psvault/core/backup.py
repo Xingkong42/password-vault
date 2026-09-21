@@ -5,7 +5,9 @@
 保险箱文件虽然被强加密保护（改一个字节就打不开），但这也意味着
 **一次误删或一次损坏就等于数据全丢**。因此：
 
-* 每次保存前，先把旧文件按时间戳留一份历史版本，而不是只留一个 .bak；
+* 每次**保存成功之后**，把新内容按时间戳留一份备份（由 Vault.save 触发）。
+  注意备份的是"刚存好的这一版"——早先备份的是被覆盖的旧版本，结果
+  备份里永远缺最新状态，误删后恢复只能拿到上一版；
 * 除了程序目录内的 backups/，再往用户「文档」目录写一份——
   整个程序文件夹被删掉时外部备份仍然在；
 * 备份文件是密文的原样副本，拷到哪都安全；
@@ -15,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +28,20 @@ APP_BACKUP_FOLDER = "密码保险箱备份"
 # 程序目录内的备份子目录
 LOCAL_BACKUP_FOLDER = "backups"
 TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
+
+
+def _recency_key(info: BackupInfo) -> tuple[int, str, int]:
+    """排序键：优先按文件名里的时间戳，而不是文件的修改时间。
+
+    同一秒内可能产生多份备份（文件名带 -1/-2 后缀），它们的 mtime 完全相同，
+    按 mtime 排序结果不稳定——用户按"最新"选，可能正好选中那份空库。
+    文件名里的时间戳＋序号才是可靠顺序。
+    """
+    match = re.search(r"-(\d{8})-(\d{6})(?:-(\d+))?$", info.path.stem)
+    if match:
+        date, clock, sequence = match.groups()
+        return (1, f"{date}{clock}", int(sequence or 0))
+    return (0, "", 0)                   # 认不出命名规则的（手动放进来的）排在最后
 
 
 def default_external_dir() -> Path:
@@ -151,7 +168,7 @@ class BackupManager:
                     location=location,
                     digest="",             # 按需计算，避免列表时读所有文件
                 ))
-        items.sort(key=lambda info: info.created_at, reverse=True)
+        items.sort(key=_recency_key, reverse=True)
         return items
 
     def latest(self) -> BackupInfo | None:
